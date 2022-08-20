@@ -1,11 +1,7 @@
 pub use buffer::Buffer;
 use marker::InvariantLifetime;
 pub use marker::{ConsumerToken, ProducerToken};
-use std::{
-    cell::UnsafeCell,
-    io::Write,
-    sync::atomic::{AtomicU32, AtomicUsize, Ordering},
-};
+use std::{cell::UnsafeCell, io::Write};
 
 mod buffer;
 mod marker;
@@ -21,10 +17,8 @@ pub struct RingBuffer<'producer, 'consumer, const N: usize> {
     // however, they are accessing different areas and thus it should be fine
     buffer: UnsafeCell<[u8; N]>,
 
-    // marks the begin of consumable data in the buffer
-    // the first 4 bytes are the start of data
-    // the last 4 bytes are the length of data
-    indicies: AtomicUsize,
+    data_start: UnsafeCell<usize>,
+    data_end: UnsafeCell<usize>,
 }
 
 // FIXME: this should be fine as we do not change data without the marker which gives us exclusive
@@ -39,7 +33,8 @@ impl<'producer, 'consumer, const N: usize> Default for RingBuffer<'producer, 'co
             _marker_producer: InvariantLifetime::default(),
             _marker_consumer: InvariantLifetime::default(),
             buffer: UnsafeCell::new([0u8; N]),
-            indicies: AtomicUsize::default(),
+            data_start: UnsafeCell::default(),
+            data_end: UnsafeCell::default(),
         }
     }
 }
@@ -81,8 +76,28 @@ impl<'producer, 'consumer, const N: usize> RingBuffer<'producer, 'consumer, N> {
     }
 
     /// Return the available capacity of the buffer which can be written to
-    pub fn available(&self) -> usize {
-        N - self.indicies.load(Ordering::SeqCst) << 32 >> 32
+    pub fn len(&self) -> usize {
+        let start = unsafe { *self.data_start.get() };
+        let end = unsafe { *self.data_end.get() };
+
+        // check if buffer is full
+        if end > N {
+            return N;
+        }
+
+        // check if buffer is empty
+        if start == end {
+            return 0;
+        }
+
+        // check if data is wrapping
+        if start < end {
+            // |---S*****E-------|
+            end - start
+        } else {
+            // |*E----------S****|
+            N - start + end
+        }
     }
 
     /// Read to the given buffer and fill the free buffer
@@ -96,28 +111,23 @@ impl<'producer, 'consumer, const N: usize> RingBuffer<'producer, 'consumer, N> {
     /// If there is not enough space it will fail.
     pub fn produce<'a>(
         &self,
-        _: &'a mut ProducerToken<'producer>,
+        producer: &'a mut ProducerToken<'producer>,
         buf: &[u8],
     ) -> std::io::Result<usize> {
         // get access to empty buffer and write to it
-        let mut buffer = self.get_empty_buffer()?;
+        let end = unsafe { *self.data_end.get() };
+        let mut buffer = self.get_empty_buffer(producer)?;
+        let buffer_len = buffer.len();
         let bytes = buffer.write(buf)?;
 
-        // update length of data in buffer
-        self.indicies
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |idx| {
-                let start = (idx >> 32) as u32;
-                let mut len = (idx << 32 >> 32) as u32;
+        // check if buffer is full
+        if buffer_len == bytes {
+            // this make it clear that the buffer is full
+            unsafe { *self.data_end.get() = N + 1 };
+        } else {
+            unsafe { *self.data_end.get() = (end + bytes) % N };
+        }
 
-                // FIXME: resolv panic
-                len = len.checked_add(bytes as u32).unwrap();
-                Some((start as usize) << 32 | len as usize)
-            })
-            .map_err(|err| {
-                println!("[FAIL] - produce");
-                err
-            })
-            .unwrap();
         Ok(bytes)
     }
 
@@ -131,137 +141,105 @@ impl<'producer, 'consumer, const N: usize> RingBuffer<'producer, 'consumer, N> {
     ///
     /// # Panics
     /// If the `consumed` bytes is more than the available bytes, this will panic
-    pub fn consume<'a, F>(&self, _: &'a mut ConsumerToken<'consumer>, fun: F)
+    pub fn consume<'a, F>(&self, consumer: &'a mut ConsumerToken<'consumer>, fun: F)
     where
         F: FnOnce(Buffer) -> usize,
     {
-        let buffer = self.get_consumable_buffer();
-        let consumed = fun(self.get_consumable_buffer());
+        let start = unsafe { *self.data_start.get() };
+        // this is fine because if we are using this value it is guranteed that the buffer is full
+        // and thus this value will not change
+        let end = unsafe { *self.data_end.get() };
+
+        let buffer = self.get_consumable_buffer(consumer);
+        let buffer_len = buffer.len();
+        let consumed = fun(buffer);
 
         // update start of buffer after validity check
-        assert!(consumed <= buffer.len());
+        assert!(consumed <= buffer_len);
 
-        // this should panic as we cannot assume a safe state if those operations panic
-        self.indicies
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |idx| {
-                let mut start = (idx >> 32) as u32;
-                let mut len = (idx << 32 >> 32) as u32;
+        // check if something was consumed
+        if consumed > 0 {
+            // check if buffer was full
+            if end > N {
+                // |S*****************|
+                // |*****************S|
+                unsafe { *self.data_end.get() = start };
+            }
+            unsafe { *self.data_start.get() = (start + consumed) % N };
+        }
+    }
 
-                // consume will read data in the buffer object which can be consumed by another
-                // thread as well
-                //
-                // add another field: reserved
-                // |--R+++S******E----|
-                //
-                // 1) consume always consume the buffer by increasing start / decreasing length
-                //
-                // 2) after returning function - increase reset value (clear buffer)
-                //
-                //
-                println!("{} <= {}", consumed, len);
-
-                // FIXME: resolv panic
-                start = (start + consumed as u32) % N as u32;
-                len -= consumed as u32;
-
-                /*println!(
-                    "{} {} -> {} {}",
-                    start,
-                    len,
-                    (start as usize) << 32 | len as usize,
-                    (start as usize) << 32 | (len as usize)
-                );*/
-
-                Some((start as usize) << 32 | len as usize)
-            })
-            .map_err(|err| {
-                println!("[FAIL - consume {}]", err);
-                err
-            })
-            .unwrap();
+    pub fn read<'a, F>(&self, consumer: &'a ConsumerToken<'consumer>, fun: F)
+    where
+        F: FnOnce(Buffer),
+    {
+        let buffer = self.get_consumable_buffer(consumer);
+        fun(buffer);
     }
 
     /// Return all free buffer as writable
-    fn get_empty_buffer(&self) -> std::io::Result<Buffer> {
-        let mut buffer = None;
-        let _ = self
-            .indicies
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |idx| {
-                let start = idx >> 32;
-                let len = idx << 32 >> 32;
+    fn get_empty_buffer<'a>(&self, _: &'a mut ProducerToken<'producer>) -> std::io::Result<Buffer> {
+        let start = unsafe { *self.data_start.get() };
+        let end = unsafe { *self.data_end.get() };
 
-                // check if we are full
-                if len == N {
-                    // do not update buffer
-                    return None;
-                }
-
-                // check if free data is wrapping
-                if start + len > N {
-                    // |***E--------S***|
-                    let buffer0 =
-                        &mut unsafe { &mut *self.buffer.get() }[(start + len) % N..N - len];
-                    let buffer1 = &mut [];
-
-                    buffer = Some(Buffer(buffer0, buffer1));
-                } else {
-                    // |--S*****E-------|
-                    let buffer0 = &mut unsafe { &mut *self.buffer.get() }[start + len..];
-                    let buffer1 = &mut unsafe { &mut *self.buffer.get() }[..start];
-
-                    buffer = Some(Buffer(buffer0, buffer1));
-                }
-
-                None
-            });
-
-        if let Some(buffer) = buffer {
-            Ok(buffer)
-        } else {
-            Err(std::io::Error::new(
+        // S=E -> empty
+        // E>N -> full
+        // check if we are full
+        if end > N {
+            // do not update buffer
+            return Err(std::io::Error::new(
                 std::io::ErrorKind::OutOfMemory,
                 "Buffer is full",
-            ))
+            ));
+        }
+
+        // check if free data is wrapping
+        if start > end {
+            // |***E--------S***|
+            let buffer0 = &mut unsafe { &mut *self.buffer.get() }[end..start];
+            let buffer1 = &mut [];
+
+            Ok(Buffer(buffer0, buffer1))
+        } else {
+            // |--S*****E-------|
+            let buffer0 = &mut unsafe { &mut *self.buffer.get() }[end..];
+            let buffer1 = &mut unsafe { &mut *self.buffer.get() }[..start];
+
+            Ok(Buffer(buffer0, buffer1))
         }
     }
 
     /// Return all assigned buffer as writable
-    fn get_consumable_buffer(&self) -> Buffer {
-        let mut buffer = None;
-        let _ = self
-            .indicies
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |idx| {
-                let start = idx >> 32;
-                let len = idx << 32 >> 32;
+    ///
+    /// # Safety
+    /// We relaxed the token to be `read` as we ensure to have exclusive token if we consume from
+    /// it anyways
+    fn get_consumable_buffer<'a>(&self, _: &'a ConsumerToken<'consumer>) -> Buffer {
+        let start = unsafe { *self.data_start.get() };
+        let end = unsafe { *self.data_end.get() };
 
-                // check if empty
-                if len == 0 {
-                    // do not update buffer
-                    return None;
-                }
+        // check if buffer is full
+        if end > N {
+            // |*******S********|
+            let buffer0 = &mut unsafe { &mut *self.buffer.get() }[start..];
+            let buffer1 = &mut unsafe { &mut *self.buffer.get() }[..start];
 
-                // check if data assigned is wrapping
-                if start + len > N {
-                    // |***E--------S***|
-                    let buffer0 = &mut unsafe { &mut *self.buffer.get() }[start..];
-                    let buffer1 = &mut unsafe { &mut *self.buffer.get() }[..(start + len) % N];
+            return Buffer(buffer0, buffer1);
+        }
 
-                    buffer = Some(Buffer(buffer0, buffer1));
-                } else {
-                    // |--S*****E-------|
-                    let buffer0 = &mut unsafe { &mut *self.buffer.get() }[start..start + len];
-                    let buffer1 = &mut [];
+        // check if data assigned is wrapping
+        if start > end {
+            // |***E--------S***|
+            let buffer0 = &mut unsafe { &mut *self.buffer.get() }[start..];
+            let buffer1 = &mut unsafe { &mut *self.buffer.get() }[..end];
 
-                    buffer = Some(Buffer(buffer0, buffer1));
-                }
-
-                None
-            });
-
-        if let Some(buffer) = buffer {
-            buffer
+            Buffer(buffer0, buffer1)
         } else {
-            Buffer(&mut [], &mut [])
+            // |--S*****E-------|
+            let buffer0 = &mut unsafe { &mut *self.buffer.get() }[start..end];
+            let buffer1 = &mut [];
+
+            Buffer(buffer0, buffer1)
         }
     }
 }
@@ -270,6 +248,52 @@ impl<'producer, 'consumer, const N: usize> RingBuffer<'producer, 'consumer, N> {
 mod test {
     use crate::{ConsumerToken, ProducerToken, RingBuffer};
     use std::{io::Read, sync::Mutex};
+
+    #[test]
+    fn multi_read_only_access() {
+        ProducerToken::new(|mut producer| {
+            ConsumerToken::new(|consumer| {
+                let buffer = RingBuffer::<1024>::new();
+
+                // fill buffer with some data
+                buffer.produce(&mut producer, b"hello world").unwrap();
+
+                // spawn a new consumer thread to read only
+                std::thread::scope(|scope| {
+                    scope.spawn(|| {
+                        for n in 0..10 {
+                            buffer.read(&consumer, |mut buffer| {
+                                let mut b = [0u8; 512];
+                                let l = buffer.read(&mut b).unwrap();
+
+                                println!("r0-{}: {}", n, String::from_utf8_lossy(&b[..l]));
+                            })
+                        }
+                    });
+                    scope.spawn(|| {
+                        for n in 0..10 {
+                            buffer.read(&consumer, |mut buffer| {
+                                let mut b = [0u8; 512];
+                                let l = buffer.read(&mut b).unwrap();
+
+                                println!("r1-{}: {}", n, String::from_utf8_lossy(&b[..l]));
+                            })
+                        }
+                    });
+                    scope.spawn(|| {
+                        for n in 0..10 {
+                            buffer.read(&consumer, |mut buffer| {
+                                let mut b = [0u8; 512];
+                                let l = buffer.read(&mut b).unwrap();
+
+                                println!("r2-{}: {}", n, String::from_utf8_lossy(&b[..l]));
+                            })
+                        }
+                    });
+                });
+            });
+        });
+    }
 
     #[test]
     fn multi_write_access() {
@@ -281,51 +305,6 @@ mod test {
                 let buffer = RingBuffer::<1024>::new();
                 // spawn a new consumer thread
                 std::thread::scope(|scope| {
-                    scope.spawn(|| {
-                        for n in 0..10 {
-                            buffer.consume(&mut consumer.lock().unwrap(), |mut buffer| {
-                                let mut b = [0u8; 512];
-                                let l = buffer.read(&mut b).unwrap();
-
-                                println!("c0-{}: {}", n, l / 11);
-                                l
-                            })
-                        }
-                    });
-                    scope.spawn(|| {
-                        for n in 0..10 {
-                            buffer.consume(&mut consumer.lock().unwrap(), |mut buffer| {
-                                let mut b = [0u8; 512];
-                                let l = buffer.read(&mut b).unwrap();
-
-                                println!("c1-{}: {}", n, l / 11);
-                                l
-                            })
-                        }
-                    });
-                    scope.spawn(|| {
-                        for n in 0..10 {
-                            buffer.consume(&mut consumer.lock().unwrap(), |mut buffer| {
-                                let mut b = [0u8; 512];
-                                let l = buffer.read(&mut b).unwrap();
-
-                                println!("c2-{}: {}", n, l / 11);
-                                l
-                            })
-                        }
-                    });
-                    scope.spawn(|| {
-                        for n in 0..10 {
-                            buffer.consume(&mut consumer.lock().unwrap(), |mut buffer| {
-                                let mut b = [0u8; 512];
-                                let l = buffer.read(&mut b).unwrap();
-
-                                println!("c3-{}: {}", n, l / 11);
-                                l
-                            })
-                        }
-                    });
-
                     scope.spawn(|| {
                         for n in 0..10 {
                             buffer
@@ -347,7 +326,52 @@ mod test {
                             buffer
                                 .produce(&mut producer.lock().unwrap(), b"hello world")
                                 .unwrap();
-                            println!("p2-{}: wrote", n);
+                            println!("p3-{}: wrote", n);
+                        }
+                    });
+
+                    scope.spawn(|| {
+                        for n in 0..10 {
+                            buffer.consume(&mut consumer.lock().unwrap(), |mut buffer| {
+                                let mut b = [0u8; 512];
+                                let l = buffer.read(&mut b).unwrap();
+
+                                println!("c0-{}: {}", n, String::from_utf8_lossy(&b[..l]));
+                                l
+                            })
+                        }
+                    });
+                    scope.spawn(|| {
+                        for n in 0..10 {
+                            buffer.consume(&mut consumer.lock().unwrap(), |mut buffer| {
+                                let mut b = [0u8; 512];
+                                let l = buffer.read(&mut b).unwrap();
+
+                                println!("c1-{}: {}", n, String::from_utf8_lossy(&b[..l]));
+                                l
+                            })
+                        }
+                    });
+                    scope.spawn(|| {
+                        for n in 0..10 {
+                            buffer.consume(&mut consumer.lock().unwrap(), |mut buffer| {
+                                let mut b = [0u8; 512];
+                                let l = buffer.read(&mut b).unwrap();
+
+                                println!("c2-{}: {}", n, String::from_utf8_lossy(&b[..l]));
+                                l
+                            })
+                        }
+                    });
+                    scope.spawn(|| {
+                        for n in 0..10 {
+                            buffer.consume(&mut consumer.lock().unwrap(), |mut buffer| {
+                                let mut b = [0u8; 512];
+                                let l = buffer.read(&mut b).unwrap();
+
+                                println!("c3-{}: {}", n, String::from_utf8_lossy(&b[..l]));
+                                l
+                            })
                         }
                     });
                 });
@@ -430,9 +454,9 @@ mod test {
                 assert_eq!(buffer.produce(&mut producer, &data).unwrap(), data.len());
 
                 // consume the whole buffer
-                assert!(buffer.available() == 0);
+                assert!(buffer.len() == 64);
                 buffer.consume(&mut consumer, |_buffer| 64);
-                assert!(buffer.available() == 64);
+                assert!(buffer.len() == 0);
             });
         });
     }
@@ -448,9 +472,9 @@ mod test {
                 assert_eq!(buffer.produce(&mut producer, &data).unwrap(), data.len());
 
                 // consume the whole buffer
-                assert!(buffer.available() == 0);
+                assert!(buffer.len() == 64);
                 buffer.consume(&mut consumer, |_buffer| 64);
-                assert!(buffer.available() == 64);
+                assert!(buffer.len() == 0);
 
                 let data = [b'A'; 8];
                 assert_eq!(buffer.produce(&mut producer, &data).unwrap(), data.len());
@@ -463,9 +487,9 @@ mod test {
                 assert_eq!(buffer.produce(&mut producer, &data).unwrap(), data.len());
 
                 // consume the whole buffer
-                assert!(buffer.available() == 0);
+                assert!(buffer.len() == 64);
                 buffer.consume(&mut consumer, |_buffer| 64);
-                assert!(buffer.available() == 64);
+                assert!(buffer.len() == 0);
             });
         });
     }
