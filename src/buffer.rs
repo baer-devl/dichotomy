@@ -35,7 +35,7 @@ impl<'a> Write for Buffer<'a> {
         let bytes = self.0.as_mut().write(buf)?;
 
         // return if we wrote all of the buffer
-        if bytes <= self.0.len() {
+        if bytes == buf.len() {
             Ok(bytes)
         } else {
             // write to the second buffer

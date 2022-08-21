@@ -14,10 +14,16 @@ pub struct RingBuffer<'producer, 'consumer, const N: usize> {
     _marker_consumer: InvariantLifetime<'consumer>,
 
     // binary buffer which can be accessed by both, the producer and consumer
-    // however, they are accessing different areas and thus it should be fine
+    // however, they are accessing different areas and thus it is safe to operate on the same
+    // buffer
     buffer: UnsafeCell<[u8; N]>,
 
+    // marks the begin of consumable data
+    // this is only changed by the consumer
     data_start: UnsafeCell<usize>,
+
+    // marks the end of consumable data
+    // this is only changed by the producer
     data_end: UnsafeCell<usize>,
 }
 
@@ -29,6 +35,9 @@ unsafe impl<'producer, 'consumer, const N: usize> Sync for RingBuffer<'producer,
 
 impl<'producer, 'consumer, const N: usize> Default for RingBuffer<'producer, 'consumer, N> {
     fn default() -> Self {
+        // `N` MUST be at least 1 smaller than the max value
+        assert!(N < usize::MAX);
+
         Self {
             _marker_producer: InvariantLifetime::default(),
             _marker_consumer: InvariantLifetime::default(),
@@ -76,8 +85,13 @@ impl<'producer, 'consumer, const N: usize> RingBuffer<'producer, 'consumer, N> {
     }
 
     /// Return the available capacity of the buffer which can be written to
-    pub fn len(&self) -> usize {
+    pub fn len(&self, _: &ConsumerToken<'consumer>) -> usize {
+        // getting this value is fine as we are holding the consumer token and it cannot be changed
+        // until someone gets a mutual consumer token
         let start = unsafe { *self.data_start.get() };
+        // reading this value is not safe
+        // however, if it would change later on it would only show a wrong length of the buffer but
+        // never less as it cannot be consumed as we hold the consumer token
         let end = unsafe { *self.data_end.get() };
 
         // check if buffer is full
@@ -85,18 +99,39 @@ impl<'producer, 'consumer, const N: usize> RingBuffer<'producer, 'consumer, N> {
             return N;
         }
 
-        // check if buffer is empty
-        if start == end {
-            return 0;
-        }
-
         // check if data is wrapping
-        if start < end {
+        if start <= end {
             // |---S*****E-------|
             end - start
         } else {
             // |*E----------S****|
             N - start + end
+        }
+    }
+
+    pub fn free(&self, _: &ProducerToken<'producer>) -> usize {
+        // getting the start value is not safe
+        // however, the worst that could happen is that the value will increase thus giving us a
+        // bigger free space later in the calculation
+        // this is no problem as we would give a smaller free space back than it might be at this
+        // point
+        let start = unsafe { *self.data_start.get() };
+        // get the end value is safe as we hold the producer token which gurantees that it will not
+        // change until we leave this function
+        let end = unsafe { *self.data_end.get() };
+
+        // check if buffer is full
+        if end > N {
+            return 0;
+        }
+
+        // check if data is wrapping
+        if start <= end {
+            // |---S*****E-------|
+            N - start + end
+        } else {
+            // |*E----------S****|
+            start - end
         }
     }
 
@@ -109,15 +144,26 @@ impl<'producer, 'consumer, const N: usize> RingBuffer<'producer, 'consumer, N> {
     /// We also only change `data_end` here, nowhere else so this should be fine as well.
     ///
     /// If there is not enough space it will fail.
-    pub fn produce<'a>(
+    pub fn produce(
         &self,
-        producer: &'a mut ProducerToken<'producer>,
+        producer: &mut ProducerToken<'producer>,
         buf: &[u8],
     ) -> std::io::Result<usize> {
         // get access to empty buffer and write to it
         let end = unsafe { *self.data_end.get() };
         let mut buffer = self.get_empty_buffer(producer)?;
         let buffer_len = buffer.len();
+
+        // check if we can write whole bytes into our buffer
+        // FIXME: this should not be handled by the buffer -> maybe another function which handles
+        // this
+        if buf.len() > buffer_len {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::OutOfMemory,
+                "there is not enough space left",
+            ));
+        }
+
         let bytes = buffer.write(buf)?;
 
         // check if buffer is full
@@ -163,6 +209,11 @@ impl<'producer, 'consumer, const N: usize> RingBuffer<'producer, 'consumer, N> {
             if end > N {
                 // |S*****************|
                 // |*****************S|
+                // # Safety
+                // the consumer token will not gurantee us exclusive access to the `data_end`
+                // value. however, this is safe because we only can change the value if the buffer
+                // is full and in this case this value cannot be changed by anybody else!
+                // thus its safe to change it
                 unsafe { *self.data_end.get() = start };
             }
             unsafe { *self.data_start.get() = (start + consumed) % N };
@@ -178,8 +229,16 @@ impl<'producer, 'consumer, const N: usize> RingBuffer<'producer, 'consumer, N> {
     }
 
     /// Return all free buffer as writable
+    ///
+    /// # Safety
+    /// We holding the exclusive producer token so we can ensure that we are the only one accessing
+    /// the empty data.
     fn get_empty_buffer<'a>(&self, _: &'a mut ProducerToken<'producer>) -> std::io::Result<Buffer> {
+        // this could be changing after the read - however, the only result would be that the
+        // accessable empty buffer would be smaller than it really would be
         let start = unsafe { *self.data_start.get() };
+        // this value is controlled by the producer token exclusivly and will not change as long as
+        // the returned `Buffer` object exists
         let end = unsafe { *self.data_end.get() };
 
         // S=E -> empty
@@ -187,6 +246,7 @@ impl<'producer, 'consumer, const N: usize> RingBuffer<'producer, 'consumer, N> {
         // check if we are full
         if end > N {
             // do not update buffer
+            // FIXME: maybe just return empty buffer?
             return Err(std::io::Error::new(
                 std::io::ErrorKind::OutOfMemory,
                 "Buffer is full",
@@ -215,7 +275,14 @@ impl<'producer, 'consumer, const N: usize> RingBuffer<'producer, 'consumer, N> {
     /// We relaxed the token to be `read` as we ensure to have exclusive token if we consume from
     /// it anyways
     fn get_consumable_buffer<'a>(&self, _: &'a ConsumerToken<'consumer>) -> Buffer {
+        // this value is only changed by the consumer and as we are holding the exclusive token
+        // when we are accessing it over the `consume` function, we can ensure it will not change.
+        // however, if this gets called via the `read` function we also can ensure this will not be
+        // changed as a mutual access would also mean that there are no read-only references to be
+        // used
         let start = unsafe { *self.data_start.get() };
+        // this value could change after we read from it. however, this only will give us a smaller
+        // consumable buffer to read from and would be resolved if we would call it again
         let end = unsafe { *self.data_end.get() };
 
         // check if buffer is full
@@ -454,9 +521,9 @@ mod test {
                 assert_eq!(buffer.produce(&mut producer, &data).unwrap(), data.len());
 
                 // consume the whole buffer
-                assert!(buffer.len() == 64);
+                assert!(buffer.len(&consumer) == 64);
                 buffer.consume(&mut consumer, |_buffer| 64);
-                assert!(buffer.len() == 0);
+                assert!(buffer.len(&consumer) == 0);
             });
         });
     }
@@ -472,9 +539,9 @@ mod test {
                 assert_eq!(buffer.produce(&mut producer, &data).unwrap(), data.len());
 
                 // consume the whole buffer
-                assert!(buffer.len() == 64);
+                assert!(buffer.len(&consumer) == 64);
                 buffer.consume(&mut consumer, |_buffer| 64);
-                assert!(buffer.len() == 0);
+                assert!(buffer.len(&consumer) == 0);
 
                 let data = [b'A'; 8];
                 assert_eq!(buffer.produce(&mut producer, &data).unwrap(), data.len());
@@ -487,9 +554,9 @@ mod test {
                 assert_eq!(buffer.produce(&mut producer, &data).unwrap(), data.len());
 
                 // consume the whole buffer
-                assert!(buffer.len() == 64);
+                assert!(buffer.len(&consumer) == 64);
                 buffer.consume(&mut consumer, |_buffer| 64);
-                assert!(buffer.len() == 0);
+                assert!(buffer.len(&consumer) == 0);
             });
         });
     }
@@ -626,6 +693,46 @@ mod test {
                     assert_eq!(len, 0);
 
                     0
+                });
+            });
+        });
+    }
+
+    #[test]
+    fn read_buffer_multiple_times_wrapping() {
+        ProducerToken::new(|mut producer| {
+            ConsumerToken::new(|mut consumer| {
+                let buffer = RingBuffer::<32>::new();
+                const DATA: &[u8] = b"hello world";
+
+                std::thread::scope(|scope| {
+                    scope.spawn(|| {
+                        let mut count = 0;
+                        while count < 10 {
+                            if let Ok(bytes) = buffer.produce(&mut producer, DATA) {
+                                assert_eq!(bytes, DATA.len());
+                                count += 1
+                            }
+                        }
+                    });
+
+                    scope.spawn(|| {
+                        let mut count = 0;
+                        while count < 10 {
+                            buffer.consume(&mut consumer, |mut buffer| {
+                                let mut buf = [0u8; DATA.len()];
+                                let len = buffer.read(&mut buf).unwrap();
+
+                                if len == DATA.len() {
+                                    assert_eq!(&buf[..], DATA);
+                                    count += 1;
+                                    len
+                                } else {
+                                    0
+                                }
+                            });
+                        }
+                    });
                 });
             });
         });
