@@ -83,11 +83,20 @@ fn async_multi_rw_1m() {
 }
 
 fn criterion_benchmark(c: &mut Criterion) {
-    let mut group = c.benchmark_group("sample-500");
-    group.sample_size(500);
-    group.bench_function("read-buffer", |b| b.iter(|| read_buffer()));
-    group.bench_function("multi-read-buffer", |b| b.iter(|| multi_read_buffer()));
-    group.bench_function("async-rw-1m", |b| b.iter(|| async_multi_rw_1m()));
+    {
+        let mut group = c.benchmark_group("sample size of 100");
+        group.sample_size(100);
+        group.bench_function("read-buffer", |b| b.iter(|| read_buffer()));
+        group.bench_function("multi-read-buffer", |b| b.iter(|| multi_read_buffer()));
+        group.bench_function("async-rw-1m", |b| b.iter(|| async_multi_rw_1m()));
+    }
+    {
+        let mut group = c.benchmark_group("sample size of 500");
+        group.sample_size(500);
+        group.bench_function("read-buffer", |b| b.iter(|| read_buffer()));
+        group.bench_function("multi-read-buffer", |b| b.iter(|| multi_read_buffer()));
+        group.bench_function("async-rw-1m", |b| b.iter(|| async_multi_rw_1m()));
+    }
 }
 
 criterion_group!(benches, criterion_benchmark);
