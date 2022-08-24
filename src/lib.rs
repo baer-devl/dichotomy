@@ -740,12 +740,12 @@ mod test {
 
     #[test]
     fn silly() {
+        const SIZE: usize = 32;
+        const DATA: &[u8] = b"hello world";
+        const ITERATIONS: usize = 100_000_000;
+
         ProducerToken::new(|mut producer| {
             ConsumerToken::new(|mut consumer| {
-                const SIZE: usize = 32;
-                const DATA: &[u8] = b"hello world";
-                const ITERATIONS: usize = 1_000_000;
-
                 let buffer = RingBuffer::<SIZE>::new();
                 std::thread::scope(|scope| {
                     scope.spawn(|| {
@@ -758,7 +758,6 @@ mod test {
                         }
                         println!("producer done");
                     });
-
                     scope.spawn(|| {
                         let mut count = 0;
                         while count < ITERATIONS {
@@ -775,7 +774,8 @@ mod test {
                                 }
                             });
                         }
-                        println!("done");
+                        println!("consumer done");
+                        assert!(buffer.len(&consumer) == 0);
                     });
                 });
             });
