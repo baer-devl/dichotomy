@@ -739,6 +739,50 @@ mod test {
     }
 
     #[test]
+    fn silly() {
+        ProducerToken::new(|mut producer| {
+            ConsumerToken::new(|mut consumer| {
+                const SIZE: usize = 32;
+                const DATA: &[u8] = b"hello world";
+                const ITERATIONS: usize = 1_000_000;
+
+                let buffer = RingBuffer::<SIZE>::new();
+                std::thread::scope(|scope| {
+                    scope.spawn(|| {
+                        let mut count = 0;
+                        while count < ITERATIONS {
+                            if let Ok(bytes) = buffer.produce(&mut producer, DATA) {
+                                assert_eq!(bytes, DATA.len());
+                                count += 1
+                            }
+                        }
+                        println!("producer done");
+                    });
+
+                    scope.spawn(|| {
+                        let mut count = 0;
+                        while count < ITERATIONS {
+                            buffer.consume(&mut consumer, |mut buffer| {
+                                let mut buf = [0u8; DATA.len()];
+                                let len = buffer.read(&mut buf).unwrap();
+
+                                if len == DATA.len() {
+                                    assert_eq!(&buf[..], DATA);
+                                    count += 1;
+                                    len
+                                } else {
+                                    0
+                                }
+                            });
+                        }
+                        println!("done");
+                    });
+                });
+            });
+        });
+    }
+
+    #[test]
     #[should_panic]
     fn consume_more_than_available_data() {
         ProducerToken::new(|mut producer| {
