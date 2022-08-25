@@ -48,33 +48,17 @@ fn async_multi_rw_1m() {
             std::thread::scope(|scope| {
                 // producer
                 scope.spawn(|| {
-                    let mut pushes = 0;
-                    while pushes < ITERATIONS {
-                        if let Ok(bytes) = buffer.produce(&mut producer, DATA) {
-                            assert!(bytes == DATA.len());
-                            pushes += 1;
-                        } else {
-                            // nothing to do - yield
-                            std::thread::yield_now();
-                        }
+                    for _ in 0..ITERATIONS {
+                        buffer.write_all(&mut producer, DATA).unwrap()
                     }
                 });
 
                 // consumer
                 scope.spawn(|| {
                     let mut buf = [0u8; DATA.len()];
-                    let mut reads = 0;
-                    while reads < ITERATIONS {
-                        buffer.consume(&mut consumer, |mut buffer| {
-                            if buffer.read_exact(&mut buf).is_ok() {
-                                reads += 1;
-                                DATA.len()
-                            } else {
-                                // nothing to do - yield
-                                std::thread::yield_now();
-                                0
-                            }
-                        });
+                    for _ in 0..ITERATIONS {
+                        buffer.read_exact(&mut consumer, &mut buf).unwrap();
+                        assert!(DATA == buf)
                     }
                 });
             });

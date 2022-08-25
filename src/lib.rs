@@ -1,7 +1,10 @@
 pub use buffer::Buffer;
 use marker::InvariantLifetime;
 pub use marker::{ConsumerToken, ProducerToken};
-use std::{cell::UnsafeCell, io::Write};
+use std::{
+    cell::UnsafeCell,
+    io::{Read, Write},
+};
 
 mod buffer;
 mod marker;
@@ -35,13 +38,19 @@ unsafe impl<'producer, 'consumer, const N: usize> Sync for RingBuffer<'producer,
 
 impl<'producer, 'consumer, const N: usize> Default for RingBuffer<'producer, 'consumer, N> {
     fn default() -> Self {
-        // `N` MUST be at least 1 smaller than the max value
-        assert!(N < usize::MAX);
+        // FIXME ensure we are in a 64bit architecutre
+        // 32bit arch would only support up to 64KB!
+        // 64bit arch would support up to 4GB
+        assert!(usize::MAX as u64 == u64::MAX);
+        // `N` MUST be smaller than `u32::MAX` because we need an additional flag to indicate that
+        // the buffer is full
+        assert!(N < u32::MAX as usize);
 
         Self {
             _marker_producer: InvariantLifetime::default(),
             _marker_consumer: InvariantLifetime::default(),
             buffer: UnsafeCell::new([0u8; N]),
+            // set the lower bits to 1
             data_start: UnsafeCell::default(),
             data_end: UnsafeCell::default(),
         }
@@ -132,6 +141,106 @@ impl<'producer, 'consumer, const N: usize> RingBuffer<'producer, 'consumer, N> {
         } else {
             // |*E----------S****|
             start - end
+        }
+    }
+
+    pub fn write_all(
+        &self,
+        producer: &mut ProducerToken<'producer>,
+        buf: &[u8],
+    ) -> std::io::Result<()> {
+        let mut written = 0;
+
+        loop {
+            match self.get_empty_buffer2(producer) {
+                Ok((index, state, mut buffer)) => {
+                    // write from buffer
+                    let bytes = buffer.write(&buf[written..])?;
+                    /*println!(
+                        "WRITE: {index}->{} [{state}]  buffer: {}",
+                        (index + bytes) % N,
+                        buffer.len()
+                    );*/
+
+                    // ensure we wrote something
+                    if bytes > 0 {
+                        // update end value
+                        let state = state + 1;
+                        let index = (index + bytes) % N;
+                        let end = index << 32 | state;
+
+                        // set new value
+                        unsafe { *self.data_end.get() = end };
+
+                        // return if we wrote all bytes
+                        written += bytes;
+                        if written == buf.len() {
+                            return Ok(());
+                        }
+                    }
+                }
+                Err((index_start, state_start)) => {
+                    // if consumer change the index we can write again
+                    //println!("WRITE: ENTER spin-loop");
+                    while unsafe {
+                        *self.data_start.get() >> 32 == index_start
+                            && *self.data_start.get() << 32 >> 32 == state_start
+                    } {
+                        std::hint::spin_loop()
+                    }
+                    //println!("WRITE: EXIT spin-loop");
+                }
+            }
+        }
+    }
+
+    pub fn read_exact(
+        &self,
+        consumer: &mut ConsumerToken<'consumer>,
+        buf: &mut [u8],
+    ) -> std::io::Result<()> {
+        let mut read = 0;
+
+        loop {
+            match self.get_consumable_buffer2(consumer) {
+                Ok((index, _state, _index_end, state_end, mut buffer)) => {
+                    // read to buffer
+                    let bytes = buffer.read(&mut buf[read..])?;
+                    /*println!(
+                        "READ:  {index}->{} [{state}]  buffer: {}",
+                        (index + bytes) % N,
+                        buffer.len()
+                    );*/
+
+                    // ensure we read something
+                    if bytes > 0 {
+                        // set new value
+                        let state = state_end;
+                        let index = (index + bytes) % N;
+                        let start = index << 32 | state;
+
+                        // new value
+                        unsafe { *self.data_start.get() = start };
+
+                        // return if we read all bytes from the buffer
+                        read += bytes;
+                        if read == buf.len() {
+                            return Ok(());
+                        }
+                    }
+                }
+                Err((index_end, state_end)) => {
+                    // if producer wrote new data we can read again
+                    //println!("READ:  ENTER spin-loop");
+                    while unsafe {
+                        *self.data_end.get() >> 32 == index_end
+                            && *self.data_end.get() << 32 >> 32 == state_end
+                    } {
+                        std::hint::spin_loop()
+                    }
+                    //println!("READ:  EXIT spin-loop");
+                }
+            }
         }
     }
 
@@ -228,6 +337,106 @@ impl<'producer, 'consumer, const N: usize> RingBuffer<'producer, 'consumer, N> {
         fun(buffer);
     }
 
+    fn get_empty_buffer2<'a>(
+        &self,
+        _: &'a mut ProducerToken<'producer>,
+    ) -> Result<(usize, usize, Buffer), (usize, usize)> {
+        // this could be changing after the read - however, the only result would be that the
+        // accessable empty buffer would be smaller than it really would be
+        let data_start = unsafe { *self.data_start.get() };
+        // this value is controlled by the producer token exclusivly and will not change as long as
+        // the returned `Buffer` object exists
+        let data_end = unsafe { *self.data_end.get() };
+
+        let index_start = data_start >> 32;
+        let state_start = data_start << 32 >> 32;
+
+        let index = data_end >> 32;
+        let state = data_end << 32 >> 32;
+
+        // check if buffer is full
+        if index == index_start && state != state_start {
+            return Err((index_start, state_start));
+        }
+
+        // check if free data is wrapping
+        let buffer = if index_start > index {
+            // |***E--------S***|
+            let buffer0 = &mut unsafe { &mut *self.buffer.get() }[index..index_start];
+            let buffer1 = &mut [];
+
+            Buffer(buffer0, buffer1)
+        } else {
+            // |--S*****E-------|
+            let buffer0 = &mut unsafe { &mut *self.buffer.get() }[index..];
+            let buffer1 = &mut unsafe { &mut *self.buffer.get() }[..index_start];
+
+            Buffer(buffer0, buffer1)
+        };
+
+        if buffer.len() > 0 {
+            Ok((index, state, buffer))
+        } else {
+            Err((index_start, state_start))
+        }
+    }
+
+    fn get_consumable_buffer2<'a>(
+        &self,
+        _: &'a ConsumerToken<'consumer>,
+    ) -> Result<(usize, usize, usize, usize, Buffer), (usize, usize)> {
+        // this value could change after we read from it. however, this only will give us a smaller
+        // consumable buffer to read from and would be resolved if we would call it again
+        let data_end = unsafe { *self.data_end.get() };
+        // this value is only changed by the consumer and as we are holding the exclusive token
+        // when we are accessing it over the `consume` function, we can ensure it will not change.
+        // however, if this gets called via the `read` function we also can ensure this will not be
+        // changed as a mutual access would also mean that there are no read-only references to be
+        // used
+        let data_start = unsafe { *self.data_start.get() };
+
+        let index = data_start >> 32;
+        let state = data_start << 32 >> 32;
+
+        let index_end = data_end >> 32;
+        let state_end = data_end << 32 >> 32;
+
+        // check if buffer is empty
+        if index == index_end && state == state_end {
+            return Err((index_end, state_end));
+        }
+
+        // check if buffer is full
+        if index == index_end && state != state_end {
+            // |*******S********|
+            let buffer0 = &mut unsafe { &mut *self.buffer.get() }[index..];
+            let buffer1 = &mut unsafe { &mut *self.buffer.get() }[..index];
+
+            return Ok((index, state, index_end, state_end, Buffer(buffer0, buffer1)));
+        }
+
+        // check if data assigned is wrapping
+        let buffer = if index > index_end {
+            // |***E--------S***|
+            let buffer0 = &mut unsafe { &mut *self.buffer.get() }[index..];
+            let buffer1 = &mut unsafe { &mut *self.buffer.get() }[..index_end];
+
+            Buffer(buffer0, buffer1)
+        } else {
+            // |--S*****E-------|
+            let buffer0 = &mut unsafe { &mut *self.buffer.get() }[index..index_end];
+            let buffer1 = &mut [];
+
+            Buffer(buffer0, buffer1)
+        };
+
+        if buffer.len() > 0 {
+            Ok((index, state, index_end, state_end, buffer))
+        } else {
+            Err((index_end, state_end))
+        }
+    }
+
     /// Return all free buffer as writable
     ///
     /// # Safety
@@ -314,7 +523,7 @@ impl<'producer, 'consumer, const N: usize> RingBuffer<'producer, 'consumer, N> {
 #[cfg(test)]
 mod test {
     use crate::{ConsumerToken, ProducerToken, RingBuffer};
-    use std::{io::Read, sync::Mutex};
+    use std::{io::Read, process::exit, sync::Mutex};
 
     #[test]
     fn multi_read_only_access() {
@@ -742,40 +951,28 @@ mod test {
     fn silly() {
         const SIZE: usize = 32;
         const DATA: &[u8] = b"hello world";
-        const ITERATIONS: usize = 100_000_000;
+        const ITERATIONS: usize = 10_000_000;
 
         ProducerToken::new(|mut producer| {
             ConsumerToken::new(|mut consumer| {
                 let buffer = RingBuffer::<SIZE>::new();
                 std::thread::scope(|scope| {
                     scope.spawn(|| {
-                        let mut count = 0;
-                        while count < ITERATIONS {
-                            if let Ok(bytes) = buffer.produce(&mut producer, DATA) {
-                                assert_eq!(bytes, DATA.len());
-                                count += 1
-                            }
+                        for _ in 0..ITERATIONS {
+                            buffer.write_all(&mut producer, DATA).unwrap()
                         }
                         println!("producer done");
                     });
                     scope.spawn(|| {
-                        let mut count = 0;
-                        while count < ITERATIONS {
-                            buffer.consume(&mut consumer, |mut buffer| {
-                                let mut buf = [0u8; DATA.len()];
-                                let len = buffer.read(&mut buf).unwrap();
-
-                                if len == DATA.len() {
-                                    assert_eq!(&buf[..], DATA);
-                                    count += 1;
-                                    len
-                                } else {
-                                    0
-                                }
-                            });
+                        let mut buf = [0u8; DATA.len()];
+                        for _ in 0..ITERATIONS {
+                            buffer.read_exact(&mut consumer, &mut buf).unwrap();
+                            if buf != DATA {
+                                scope.spawn(move || assert!(buf == DATA));
+                                exit(1);
+                            }
                         }
                         println!("consumer done");
-                        assert!(buffer.len(&consumer) == 0);
                     });
                 });
             });
