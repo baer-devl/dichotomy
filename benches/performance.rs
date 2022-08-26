@@ -1,36 +1,33 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use dual_access_ringbuffer::*;
-use std::io::Read;
 
 fn read_buffer() {
+    const DATA: &[u8] = b"hello world";
+
     ProducerToken::new(|mut producer| {
         ConsumerToken::new(|mut consumer| {
             let buffer = RingBuffer::<64>::new();
-            let data = b"hello world";
-            buffer.produce(&mut producer, data).unwrap();
+            buffer.write_all(&mut producer, DATA).unwrap();
 
             // read the whole buffer
-            buffer.consume(&mut consumer, |mut buffer| {
-                let mut buf = [0u8; 16];
-                buffer.read(&mut buf).unwrap()
-            });
+            let mut buf = [0u8; DATA.len()];
+            buffer.read_exact(&mut consumer, &mut buf).unwrap();
         });
     });
 }
 
 fn multi_read_buffer() {
+    const DATA: &[u8] = b"hello world";
+
     ProducerToken::new(|mut producer| {
         ConsumerToken::new(|consumer| {
             let buffer = RingBuffer::<64>::new();
-            let data = b"hello world";
-            buffer.produce(&mut producer, data).unwrap();
+            buffer.write_all(&mut producer, DATA).unwrap();
 
             // read the whole buffer
             for _ in 0..100 {
-                buffer.read(&consumer, |mut buffer| {
-                    let mut buf = [0u8; 16];
-                    let _ = buffer.read(&mut buf).unwrap();
-                });
+                let mut buf = [0u8; DATA.len()];
+                buffer.read(&consumer, &mut buf).unwrap();
             }
         });
     });
