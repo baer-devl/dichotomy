@@ -181,10 +181,7 @@ impl<'producer, 'consumer, const N: usize> RingBuffer<'producer, 'consumer, N> {
                 Err((index_start, state_start)) => {
                     // if consumer change the index we can write again
                     //println!("WRITE: ENTER spin-loop");
-                    while unsafe {
-                        *self.data_start.get() >> 32 == index_start
-                            && *self.data_start.get() << 32 >> 32 == state_start
-                    } {
+                    while unsafe { *self.data_start.get() == index_start << 32 | state_start } {
                         std::hint::spin_loop()
                     }
                     //println!("WRITE: EXIT spin-loop");
@@ -231,10 +228,7 @@ impl<'producer, 'consumer, const N: usize> RingBuffer<'producer, 'consumer, N> {
                 Err((index_end, state_end)) => {
                     // if producer wrote new data we can read again
                     //println!("READ:  ENTER spin-loop");
-                    while unsafe {
-                        *self.data_end.get() >> 32 == index_end
-                            && *self.data_end.get() << 32 >> 32 == state_end
-                    } {
+                    while unsafe { *self.data_end.get() == index_end << 32 | state_end } {
                         std::hint::spin_loop()
                     }
                     //println!("READ:  EXIT spin-loop");
