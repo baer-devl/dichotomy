@@ -257,10 +257,10 @@ impl<'producer, 'consumer, const N: usize> RingBuffer<'producer, 'consumer, N> {
         let data_end = unsafe { *self.data_end.get() };
 
         let index_start = data_start >> 32;
-        let state_start = data_start << 32 >> 32;
+        let state_start = data_start & 0xffffff;
 
         let index = data_end >> 32;
-        let state = data_end << 32 >> 32;
+        let state = data_end & 0xffffff;
 
         // check if buffer is full
         if index == index_start && state != state_start {
@@ -304,10 +304,10 @@ impl<'producer, 'consumer, const N: usize> RingBuffer<'producer, 'consumer, N> {
         let data_start = unsafe { *self.data_start.get() };
 
         let index = data_start >> 32;
-        let state = data_start << 32 >> 32;
+        let state = data_start & 0xffffff;
 
         let index_end = data_end >> 32;
-        let state_end = data_end << 32 >> 32;
+        let state_end = data_end & 0xffffff;
 
         // check if buffer is empty
         if index == index_end && state == state_end {
@@ -775,7 +775,7 @@ mod test {
     fn silly() {
         const SIZE: usize = 32;
         const DATA: &[u8] = b"hello world";
-        const ITERATIONS: usize = 1_000_000;
+        const ITERATIONS: usize = 100_000_000;
 
         ProducerToken::new(|mut producer| {
             ConsumerToken::new(|mut consumer| {
