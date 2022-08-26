@@ -178,10 +178,10 @@ impl<'producer, 'consumer, const N: usize> RingBuffer<'producer, 'consumer, N> {
                         }
                     }
                 }
-                Err((index_start, state_start)) => {
+                Err(data_start) => {
                     // if consumer change the index we can write again
                     //println!("WRITE: ENTER spin-loop");
-                    while unsafe { *self.data_start.get() == index_start << 32 | state_start } {
+                    while unsafe { *self.data_start.get() == data_start } {
                         std::hint::spin_loop()
                     }
                     //println!("WRITE: EXIT spin-loop");
@@ -225,10 +225,10 @@ impl<'producer, 'consumer, const N: usize> RingBuffer<'producer, 'consumer, N> {
                         }
                     }
                 }
-                Err((index_end, state_end)) => {
+                Err(data_end) => {
                     // if producer wrote new data we can read again
                     //println!("READ:  ENTER spin-loop");
-                    while unsafe { *self.data_end.get() == index_end << 32 | state_end } {
+                    while unsafe { *self.data_end.get() == data_end } {
                         std::hint::spin_loop()
                     }
                     //println!("READ:  EXIT spin-loop");
@@ -248,7 +248,7 @@ impl<'producer, 'consumer, const N: usize> RingBuffer<'producer, 'consumer, N> {
     fn get_writeable_buffer<'a>(
         &self,
         _: &'a mut ProducerToken<'producer>,
-    ) -> Result<(usize, usize, Buffer), (usize, usize)> {
+    ) -> Result<(usize, usize, Buffer), usize> {
         // this could be changing after the read - however, the only result would be that the
         // accessable empty buffer would be smaller than it really would be
         let data_start = unsafe { *self.data_start.get() };
@@ -264,7 +264,7 @@ impl<'producer, 'consumer, const N: usize> RingBuffer<'producer, 'consumer, N> {
 
         // check if buffer is full
         if index == index_start && state != state_start {
-            return Err((index_start, state_start));
+            return Err(data_start);
         }
 
         // check if free data is wrapping
@@ -285,14 +285,14 @@ impl<'producer, 'consumer, const N: usize> RingBuffer<'producer, 'consumer, N> {
         if buffer.len() > 0 {
             Ok((index, state, buffer))
         } else {
-            Err((index_start, state_start))
+            Err(data_start)
         }
     }
 
     fn get_readable_buffer<'a>(
         &self,
         _: &'a ConsumerToken<'consumer>,
-    ) -> Result<(usize, usize, usize, usize, Buffer), (usize, usize)> {
+    ) -> Result<(usize, usize, usize, usize, Buffer), usize> {
         // this value could change after we read from it. however, this only will give us a smaller
         // consumable buffer to read from and would be resolved if we would call it again
         let data_end = unsafe { *self.data_end.get() };
@@ -311,7 +311,7 @@ impl<'producer, 'consumer, const N: usize> RingBuffer<'producer, 'consumer, N> {
 
         // check if buffer is empty
         if index == index_end && state == state_end {
-            return Err((index_end, state_end));
+            return Err(data_end);
         }
 
         // check if buffer is full
@@ -341,7 +341,7 @@ impl<'producer, 'consumer, const N: usize> RingBuffer<'producer, 'consumer, N> {
         if buffer.len() > 0 {
             Ok((index, state, index_end, state_end, buffer))
         } else {
-            Err((index_end, state_end))
+            Err(data_end)
         }
     }
 }
@@ -775,7 +775,7 @@ mod test {
     fn silly() {
         const SIZE: usize = 32;
         const DATA: &[u8] = b"hello world";
-        const ITERATIONS: usize = 10_000_000;
+        const ITERATIONS: usize = 1_000_000;
 
         ProducerToken::new(|mut producer| {
             ConsumerToken::new(|mut consumer| {
