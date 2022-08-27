@@ -1,16 +1,16 @@
 use std::io::{Read, Write};
 
 /// Wrapper around internal buffer which handles wrapping read/writes
-pub struct Buffer<'a>(pub(crate) &'a mut [u8], pub(crate) &'a mut [u8]);
+pub struct BufferHelper<'a>(pub(crate) &'a mut [u8], pub(crate) &'a mut [u8]);
 
-impl<'a> Buffer<'a> {
+impl<'a> BufferHelper<'a> {
     /// Size of the accessable buffer
     pub fn len(&self) -> usize {
         self.0.len() + self.1.len()
     }
 }
 
-impl<'a> Read for Buffer<'a> {
+impl<'a> Read for BufferHelper<'a> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         // read from first buffer
         let bytes = self.0.as_ref().read(buf)?;
@@ -29,7 +29,7 @@ impl<'a> Read for Buffer<'a> {
     }
 }
 
-impl<'a> Write for Buffer<'a> {
+impl<'a> Write for BufferHelper<'a> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         // write to the first buffer
         let bytes = self.0.as_mut().write(buf)?;

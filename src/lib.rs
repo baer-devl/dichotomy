@@ -1,21 +1,42 @@
-pub use buffer::Buffer;
-use marker::InvariantLifetime;
-pub use marker::{ConsumerToken, ProducerToken};
+pub use buffer::BufferHelper;
 use std::{
     cell::UnsafeCell,
     io::{Read, Write},
 };
 
 mod buffer;
-mod marker;
 
-/// Dual consumption ring buffer
-pub struct RingBuffer<'producer, 'consumer, const N: usize> {
-    // used to ensure exclusive access to the producer related variables
-    _marker_producer: InvariantLifetime<'producer>,
-    // used to ensure exclusive access to the consumer related variables
-    _marker_consumer: InvariantLifetime<'consumer>,
+// if producer is dropped, consumer still can read all data from the buffer - this would not work
+// the other way around
+pub struct Producer<'a, const N: usize> {
+    buffer: &'a Buffer<N>,
+}
 
+unsafe impl<'a, const N: usize> Send for Producer<'a, N> {}
+// FIXME: this should be fine as the marker will only allow for exclusive access
+unsafe impl<'a, const N: usize> Sync for Producer<'a, N> {}
+
+impl<'a, const N: usize> Producer<'a, N> {
+    pub fn write_all(&self, buffer: &[u8]) -> std::io::Result<()> {
+        self.buffer.write_all(buffer)
+    }
+}
+
+pub struct Consumer<'a, const N: usize> {
+    buffer: &'a Buffer<N>,
+}
+
+unsafe impl<'a, const N: usize> Send for Consumer<'a, N> {}
+// FIXME: this should be fine as the marker will only allow for exclusive access
+unsafe impl<'a, const N: usize> Sync for Consumer<'a, N> {}
+
+impl<'a, const N: usize> Consumer<'a, N> {
+    pub fn read_exact(&self, buffer: &mut [u8]) -> std::io::Result<()> {
+        self.buffer.read_exact(buffer)
+    }
+}
+
+pub struct Buffer<const N: usize> {
     // binary buffer which can be accessed by both, the producer and consumer
     // however, they are accessing different areas and thus it is safe to operate on the same
     // buffer
@@ -23,20 +44,20 @@ pub struct RingBuffer<'producer, 'consumer, const N: usize> {
 
     // marks the begin of consumable data
     // this is only changed by the consumer
-    data_start: UnsafeCell<usize>,
+    zero_tag: UnsafeCell<usize>,
 
     // marks the end of consumable data
     // this is only changed by the producer
-    data_end: UnsafeCell<usize>,
+    last_tag: UnsafeCell<usize>,
 }
 
 // FIXME: this should be fine as we do not change data without the marker which gives us exclusive
 // access
-unsafe impl<'producer, 'consumer, const N: usize> Send for RingBuffer<'producer, 'consumer, N> {}
+unsafe impl<const N: usize> Send for Buffer<N> {}
 // FIXME: this should be fine as the marker will only allow for exclusive access
-unsafe impl<'producer, 'consumer, const N: usize> Sync for RingBuffer<'producer, 'consumer, N> {}
+unsafe impl<const N: usize> Sync for Buffer<N> {}
 
-impl<'producer, 'consumer, const N: usize> Default for RingBuffer<'producer, 'consumer, N> {
+impl<const N: usize> Default for Buffer<N> {
     fn default() -> Self {
         // FIXME ensure we are in a 64bit architecutre
         // 32bit arch would only support up to 64KB!
@@ -47,44 +68,62 @@ impl<'producer, 'consumer, const N: usize> Default for RingBuffer<'producer, 'co
         assert!(N < u32::MAX as usize);
 
         Self {
-            _marker_producer: InvariantLifetime::default(),
-            _marker_consumer: InvariantLifetime::default(),
             buffer: UnsafeCell::new([0u8; N]),
-            data_start: UnsafeCell::default(),
-            data_end: UnsafeCell::default(),
+            zero_tag: UnsafeCell::default(),
+            last_tag: UnsafeCell::default(),
         }
     }
 }
 
-impl<'producer, 'consumer, const N: usize> RingBuffer<'producer, 'consumer, N> {
+impl<'x, const N: usize> Buffer<N> {
     /// Create a new `RingBuffer` instance
     ///
     /// # Example
     /// ```
-    /// use dual_access_ringbuffer::{RingBuffer, ProducerToken, ConsumerToken};
+    /// use dichotomy::RingBuffer;
     ///
-    /// ProducerToken::new(|mut producer| {
-    ///     ConsumerToken::new(|mut consumer| {
-    ///         let buffer = RingBuffer::<1024>::new();
-    ///         std::thread::scope(|scope| {
-    ///             // spawn producer thread
-    ///             scope.spawn(|| {
-    ///                 for _ in 0..10 {
-    ///                     buffer.produce(&mut producer, b"hello world").unwrap();
-    ///                 }
-    ///             });
-    ///             // spawn consumer thread
-    ///             scope.spawn(|| {
-    ///                 for _ in 0..10 {
-    ///                     buffer.consume(&mut consumer, |buffer| buffer.len())
-    ///                 }
-    ///             });
-    ///         });
+    /// const DATA: &[u8] = b"hello world";
+    ///
+    /// let buffer = RingBuffer::<1024>::new();
+    /// std::thread::scope(|scope| {
+    ///     // spawn producer thread
+    ///     scope.spawn(|| {
+    ///         for _ in 0..10 {
+    ///             buffer.write_all(DATA).unwrap();
+    ///         }
+    ///     });
+    ///     // spawn consumer thread
+    ///     scope.spawn(|| {
+    ///         let mut buf = [0u8; 32];
+    ///         for _ in 0..10 {
+    ///             buffer.read_exact(&mut buf[..DATA.len()]).unwrap();
+    ///         }
     ///     });
     /// });
     /// ```
-    pub fn new() -> Self {
+    pub fn new_not() -> Self {
         Self::default()
+    }
+
+    fn get_producer_consumer<'a>(&'a self) -> (Producer<'a, N>, Consumer<'a, N>) {
+        (Producer { buffer: &self }, Consumer { buffer: &self })
+    }
+
+    pub fn into_producer_consumer<F, R>(self, fun: F) -> R
+    where
+        for<'token> F: FnOnce(Producer<'token, N>, Consumer<'token, N>) -> R,
+    {
+        let (producer, consumer) = self.get_producer_consumer();
+        fun(producer, consumer)
+    }
+
+    pub fn new<F, R>(fun: F) -> R
+    where
+        for<'token> F: FnOnce(Producer<'token, N>, Consumer<'token, N>) -> R,
+    {
+        let buffer = Buffer::default();
+        let (producer, consumer) = buffer.get_producer_consumer();
+        fun(producer, consumer)
     }
 
     /// Return the capacity of the buffer
@@ -93,14 +132,14 @@ impl<'producer, 'consumer, const N: usize> RingBuffer<'producer, 'consumer, N> {
     }
 
     /// Return the available capacity of the buffer which can be written to
-    pub fn len(&self, _: &ConsumerToken<'consumer>) -> usize {
+    pub fn len(&self) -> usize {
         // getting this value is fine as we are holding the consumer token and it cannot be changed
         // until someone gets a mutual consumer token
-        let start = unsafe { *self.data_start.get() };
+        let start = unsafe { *self.zero_tag.get() };
         // reading this value is not safe
         // however, if it would change later on it would only show a wrong length of the buffer but
         // never less as it cannot be consumed as we hold the consumer token
-        let end = unsafe { *self.data_end.get() };
+        let end = unsafe { *self.last_tag.get() };
 
         // check if buffer is full
         if end > N {
@@ -117,16 +156,16 @@ impl<'producer, 'consumer, const N: usize> RingBuffer<'producer, 'consumer, N> {
         }
     }
 
-    pub fn free(&self, _: &ProducerToken<'producer>) -> usize {
+    pub fn free(&self) -> usize {
         // getting the start value is not safe
         // however, the worst that could happen is that the value will increase thus giving us a
         // bigger free space later in the calculation
         // this is no problem as we would give a smaller free space back than it might be at this
         // point
-        let start = unsafe { *self.data_start.get() };
+        let start = unsafe { *self.zero_tag.get() };
         // get the end value is safe as we hold the producer token which gurantees that it will not
         // change until we leave this function
-        let end = unsafe { *self.data_end.get() };
+        let end = unsafe { *self.last_tag.get() };
 
         // check if buffer is full
         if end > N {
@@ -143,15 +182,11 @@ impl<'producer, 'consumer, const N: usize> RingBuffer<'producer, 'consumer, N> {
         }
     }
 
-    pub fn write_all(
-        &self,
-        producer: &mut ProducerToken<'producer>,
-        buf: &[u8],
-    ) -> std::io::Result<()> {
+    fn write_all(&self, buf: &[u8]) -> std::io::Result<()> {
         let mut written = 0;
 
         loop {
-            match self.get_writeable_buffer(producer) {
+            match self.get_writeable_buffer() {
                 Ok((index, state, mut buffer)) => {
                     // write from buffer
                     let bytes = buffer.write(&buf[written..])?;
@@ -169,7 +204,7 @@ impl<'producer, 'consumer, const N: usize> RingBuffer<'producer, 'consumer, N> {
                         let end = index << 32 | state;
 
                         // set new value
-                        unsafe { *self.data_end.get() = end };
+                        unsafe { *self.last_tag.get() = end };
 
                         // return if we wrote all bytes
                         written += bytes;
@@ -181,7 +216,7 @@ impl<'producer, 'consumer, const N: usize> RingBuffer<'producer, 'consumer, N> {
                 Err(data_start) => {
                     // if consumer change the index we can write again
                     //println!("WRITE: ENTER spin-loop");
-                    while unsafe { *self.data_start.get() == data_start } {
+                    while unsafe { *self.zero_tag.get() == data_start } {
                         std::hint::spin_loop()
                     }
                     //println!("WRITE: EXIT spin-loop");
@@ -190,15 +225,11 @@ impl<'producer, 'consumer, const N: usize> RingBuffer<'producer, 'consumer, N> {
         }
     }
 
-    pub fn read_exact(
-        &self,
-        consumer: &mut ConsumerToken<'consumer>,
-        buf: &mut [u8],
-    ) -> std::io::Result<()> {
+    fn read_exact(&self, buf: &mut [u8]) -> std::io::Result<()> {
         let mut read = 0;
 
         loop {
-            match self.get_readable_buffer(consumer) {
+            match self.get_readable_buffer() {
                 Ok((index, _state, _index_end, state_end, mut buffer)) => {
                     // read to buffer
                     let bytes = buffer.read(&mut buf[read..])?;
@@ -216,7 +247,7 @@ impl<'producer, 'consumer, const N: usize> RingBuffer<'producer, 'consumer, N> {
                         let start = index << 32 | state;
 
                         // new value
-                        unsafe { *self.data_start.get() = start };
+                        unsafe { *self.zero_tag.get() = start };
 
                         // return if we read all bytes from the buffer
                         read += bytes;
@@ -228,7 +259,7 @@ impl<'producer, 'consumer, const N: usize> RingBuffer<'producer, 'consumer, N> {
                 Err(data_end) => {
                     // if producer wrote new data we can read again
                     //println!("READ:  ENTER spin-loop");
-                    while unsafe { *self.data_end.get() == data_end } {
+                    while unsafe { *self.last_tag.get() == data_end } {
                         std::hint::spin_loop()
                     }
                     //println!("READ:  EXIT spin-loop");
@@ -237,539 +268,114 @@ impl<'producer, 'consumer, const N: usize> RingBuffer<'producer, 'consumer, N> {
         }
     }
 
-    pub fn read<'a>(
-        &self,
-        _consumer: &'a ConsumerToken<'consumer>,
-        _buffer: &mut [u8],
-    ) -> std::io::Result<usize> {
+    pub fn read<'a>(&self, _buffer: &mut [u8]) -> std::io::Result<usize> {
         unimplemented!()
     }
 
-    fn get_writeable_buffer<'a>(
-        &self,
-        _: &'a mut ProducerToken<'producer>,
-    ) -> Result<(usize, usize, Buffer), usize> {
+    fn get_writeable_buffer<'a>(&self) -> Result<(usize, usize, BufferHelper), usize> {
         // this could be changing after the read - however, the only result would be that the
         // accessable empty buffer would be smaller than it really would be
-        let data_start = unsafe { *self.data_start.get() };
+        let zero_tag = unsafe { *self.zero_tag.get() };
         // this value is controlled by the producer token exclusivly and will not change as long as
         // the returned `Buffer` object exists
-        let data_end = unsafe { *self.data_end.get() };
+        let last_tag = unsafe { *self.last_tag.get() };
 
-        let index_start = data_start >> 32;
-        let state_start = data_start & 0xffffff;
+        let zero_index = zero_tag >> 32;
+        let zero_state = zero_tag & 0xffffff;
 
-        let index = data_end >> 32;
-        let state = data_end & 0xffffff;
+        let last_index = last_tag >> 32;
+        let last_state = last_tag & 0xffffff;
 
         // check if buffer is full
-        if index == index_start && state != state_start {
-            return Err(data_start);
+        if last_index == zero_index && last_state != zero_state {
+            return Err(zero_tag);
         }
 
         // check if free data is wrapping
-        let buffer = if index_start > index {
+        let buffer = if zero_index > last_index {
             // |***E--------S***|
-            let buffer0 = &mut unsafe { &mut *self.buffer.get() }[index..index_start];
+            let buffer0 = &mut unsafe { &mut *self.buffer.get() }[last_index..zero_index];
             let buffer1 = &mut [];
 
-            Buffer(buffer0, buffer1)
+            BufferHelper(buffer0, buffer1)
         } else {
             // |--S*****E-------|
-            let buffer0 = &mut unsafe { &mut *self.buffer.get() }[index..];
-            let buffer1 = &mut unsafe { &mut *self.buffer.get() }[..index_start];
+            let buffer0 = &mut unsafe { &mut *self.buffer.get() }[last_index..];
+            let buffer1 = &mut unsafe { &mut *self.buffer.get() }[..zero_index];
 
-            Buffer(buffer0, buffer1)
+            BufferHelper(buffer0, buffer1)
         };
 
         if buffer.len() > 0 {
-            Ok((index, state, buffer))
+            Ok((last_index, last_state, buffer))
         } else {
-            Err(data_start)
+            Err(zero_tag)
         }
     }
 
-    fn get_readable_buffer<'a>(
-        &self,
-        _: &'a ConsumerToken<'consumer>,
-    ) -> Result<(usize, usize, usize, usize, Buffer), usize> {
+    fn get_readable_buffer<'a>(&self) -> Result<(usize, usize, usize, usize, BufferHelper), usize> {
         // this value could change after we read from it. however, this only will give us a smaller
         // consumable buffer to read from and would be resolved if we would call it again
-        let data_end = unsafe { *self.data_end.get() };
+        let last_tag = unsafe { *self.last_tag.get() };
         // this value is only changed by the consumer and as we are holding the exclusive token
         // when we are accessing it over the `consume` function, we can ensure it will not change.
         // however, if this gets called via the `read` function we also can ensure this will not be
         // changed as a mutual access would also mean that there are no read-only references to be
         // used
-        let data_start = unsafe { *self.data_start.get() };
+        let zero_tag = unsafe { *self.zero_tag.get() };
 
-        let index = data_start >> 32;
-        let state = data_start & 0xffffff;
+        let zero_index = zero_tag >> 32;
+        let zero_state = zero_tag & 0xffffff;
 
-        let index_end = data_end >> 32;
-        let state_end = data_end & 0xffffff;
+        let last_index = last_tag >> 32;
+        let last_state = last_tag & 0xffffff;
 
         // check if buffer is empty
-        if index == index_end && state == state_end {
-            return Err(data_end);
+        if zero_index == last_index && zero_state == last_state {
+            return Err(last_tag);
         }
 
         // check if buffer is full
-        if index == index_end && state != state_end {
+        if zero_index == last_index && zero_state != last_state {
             // |*******S********|
-            let buffer0 = &mut unsafe { &mut *self.buffer.get() }[index..];
-            let buffer1 = &mut unsafe { &mut *self.buffer.get() }[..index];
+            let buffer0 = &mut unsafe { &mut *self.buffer.get() }[zero_index..];
+            let buffer1 = &mut unsafe { &mut *self.buffer.get() }[..zero_index];
 
-            return Ok((index, state, index_end, state_end, Buffer(buffer0, buffer1)));
+            return Ok((
+                zero_index,
+                zero_state,
+                last_index,
+                last_state,
+                BufferHelper(buffer0, buffer1),
+            ));
         }
 
         // check if data assigned is wrapping
-        let buffer = if index > index_end {
+        let buffer = if zero_index > last_index {
             // |***E--------S***|
-            let buffer0 = &mut unsafe { &mut *self.buffer.get() }[index..];
-            let buffer1 = &mut unsafe { &mut *self.buffer.get() }[..index_end];
+            let buffer0 = &mut unsafe { &mut *self.buffer.get() }[zero_index..];
+            let buffer1 = &mut unsafe { &mut *self.buffer.get() }[..last_index];
 
-            Buffer(buffer0, buffer1)
+            BufferHelper(buffer0, buffer1)
         } else {
             // |--S*****E-------|
-            let buffer0 = &mut unsafe { &mut *self.buffer.get() }[index..index_end];
+            let buffer0 = &mut unsafe { &mut *self.buffer.get() }[zero_index..last_index];
             let buffer1 = &mut [];
 
-            Buffer(buffer0, buffer1)
+            BufferHelper(buffer0, buffer1)
         };
 
         if buffer.len() > 0 {
-            Ok((index, state, index_end, state_end, buffer))
+            Ok((zero_index, zero_state, last_index, last_state, buffer))
         } else {
-            Err(data_end)
+            Err(last_tag)
         }
     }
 }
 
 #[cfg(test)]
 mod test {
-    use crate::{ConsumerToken, ProducerToken, RingBuffer};
-    use std::sync::Mutex;
-
-    #[test]
-    fn multi_read_only_access() {
-        const DATA: &[u8] = b"hello world";
-
-        ProducerToken::new(|mut producer| {
-            ConsumerToken::new(|consumer| {
-                let buffer = RingBuffer::<1024>::new();
-
-                // fill buffer with some data
-                buffer.write_all(&mut producer, DATA).unwrap();
-
-                // spawn a new consumer thread to read only
-                std::thread::scope(|scope| {
-                    scope.spawn(|| {
-                        let mut buf = [0u8; DATA.len()];
-                        for _ in 0..10 {
-                            buffer.read(&consumer, &mut buf).unwrap();
-                            assert_eq!(DATA, buf);
-                        }
-                    });
-                    scope.spawn(|| {
-                        let mut buf = [0u8; DATA.len()];
-                        for _ in 0..10 {
-                            buffer.read(&consumer, &mut buf).unwrap();
-                            assert_eq!(DATA, buf);
-                        }
-                    });
-                    scope.spawn(|| {
-                        let mut buf = [0u8; DATA.len()];
-                        for _ in 0..10 {
-                            buffer.read(&consumer, &mut buf).unwrap();
-                            assert_eq!(DATA, buf);
-                        }
-                    });
-                });
-            });
-        });
-    }
-
-    #[test]
-    fn multi_write_access() {
-        const DATA: &[u8] = b"hello world";
-
-        ProducerToken::new(|producer| {
-            ConsumerToken::new(|consumer| {
-                let producer = Mutex::new(producer);
-                let consumer = Mutex::new(consumer);
-
-                let buffer = RingBuffer::<1024>::new();
-                // spawn a new consumer thread
-                std::thread::scope(|scope| {
-                    scope.spawn(|| {
-                        for _ in 0..10 {
-                            buffer
-                                .write_all(&mut producer.lock().unwrap(), DATA)
-                                .unwrap();
-                        }
-                    });
-                    scope.spawn(|| {
-                        for _ in 0..10 {
-                            buffer
-                                .write_all(&mut producer.lock().unwrap(), DATA)
-                                .unwrap();
-                        }
-                    });
-                    scope.spawn(|| {
-                        for _ in 0..10 {
-                            buffer
-                                .write_all(&mut producer.lock().unwrap(), DATA)
-                                .unwrap();
-                        }
-                    });
-
-                    scope.spawn(|| {
-                        let mut buf = [0u8; DATA.len()];
-                        for _ in 0..10 {
-                            buffer
-                                .read_exact(&mut consumer.lock().unwrap(), &mut buf)
-                                .unwrap();
-                            assert_eq!(DATA, buf);
-                        }
-                    });
-                    scope.spawn(|| {
-                        let mut buf = [0u8; DATA.len()];
-                        for _ in 0..10 {
-                            buffer
-                                .read_exact(&mut consumer.lock().unwrap(), &mut buf)
-                                .unwrap();
-                            assert_eq!(DATA, buf);
-                        }
-                    });
-                    scope.spawn(|| {
-                        let mut buf = [0u8; DATA.len()];
-                        for _ in 0..10 {
-                            buffer
-                                .read_exact(&mut consumer.lock().unwrap(), &mut buf)
-                                .unwrap();
-                            assert_eq!(DATA, buf);
-                        }
-                    });
-                });
-            });
-        });
-    }
-
-    #[test]
-    fn dual_access() {
-        ProducerToken::new(|producer| {
-            let producer = Mutex::new(producer);
-            ConsumerToken::new(|consumer| {
-                let consumer = Mutex::new(consumer);
-                let buffer = RingBuffer::<1024>::new();
-
-                unimplemented!()
-
-                // spawn a new consumer thread
-                /*std::thread::scope(|scope| {
-                        scope.spawn(|| {
-                            for _ in 0..10 {
-                                buffer.consume(&mut consumer.lock().unwrap(), |buffer| buffer.len())
-                            }
-                        });
-                        scope.spawn(|| {
-                            for _ in 0..10 {
-                                buffer
-                                    .produce(&mut producer.lock().unwrap(), b"hello world")
-                                    .unwrap();
-                            }
-                        });
-                    });
-                });
-
-                ConsumerToken::new(|consumer| {
-                    let consumer = Mutex::new(consumer);
-
-                    let buffer = RingBuffer::<1024>::new();
-                    // spawn a new consumer thread
-                    std::thread::scope(|scope| {
-                        scope.spawn(|| {
-                            for _ in 0..10 {
-                                buffer.consume(&mut consumer.lock().unwrap(), |buffer| buffer.len())
-                            }
-                        });
-                        scope.spawn(|| {
-                            for _ in 0..10 {
-                                buffer
-                                    .produce(&mut producer.lock().unwrap(), b"hello world")
-                                    .unwrap();
-                            }
-                        });
-                    });*/
-            });
-        });
-    }
-
-    #[test]
-    fn overflow() {
-        ProducerToken::new(|mut producer| {
-            ConsumerToken::new(|_consumer| {
-                let buffer = RingBuffer::<64>::new();
-                let data = [b'A'; 32];
-
-                unimplemented!()
-
-                /*assert_eq!(buffer.produce(&mut producer, &data).unwrap(), data.len());
-                assert_eq!(buffer.produce(&mut producer, &data).unwrap(), data.len());
-
-                // this should fail as buffer is full
-                assert!(buffer.produce(&mut producer, &data).is_err());*/
-            });
-        });
-    }
-
-    #[test]
-    fn consume_full_buffer() {
-        ProducerToken::new(|mut producer| {
-            ConsumerToken::new(|mut consumer| {
-                let buffer = RingBuffer::<64>::new();
-                let data = [b'A'; 32];
-
-                unimplemented!()
-
-                /*assert_eq!(buffer.produce(&mut producer, &data).unwrap(), data.len());
-                assert_eq!(buffer.produce(&mut producer, &data).unwrap(), data.len());
-
-                // consume the whole buffer
-                assert!(buffer.len(&consumer) == 64);
-                buffer.consume(&mut consumer, |_buffer| 64);
-                assert!(buffer.len(&consumer) == 0);*/
-            });
-        });
-    }
-
-    #[test]
-    fn consume_full_buffer_and_fill_again() {
-        ProducerToken::new(|mut producer| {
-            ConsumerToken::new(|mut consumer| {
-                let buffer = RingBuffer::<64>::new();
-                let data = [b'A'; 32];
-
-                unimplemented!()
-
-                /*assert_eq!(buffer.produce(&mut producer, &data).unwrap(), data.len());
-                assert_eq!(buffer.produce(&mut producer, &data).unwrap(), data.len());
-
-                // consume the whole buffer
-                assert!(buffer.len(&consumer) == 64);
-                buffer.consume(&mut consumer, |_buffer| 64);
-                assert!(buffer.len(&consumer) == 0);
-
-                let data = [b'A'; 8];
-                assert_eq!(buffer.produce(&mut producer, &data).unwrap(), data.len());
-                assert_eq!(buffer.produce(&mut producer, &data).unwrap(), data.len());
-                assert_eq!(buffer.produce(&mut producer, &data).unwrap(), data.len());
-                assert_eq!(buffer.produce(&mut producer, &data).unwrap(), data.len());
-                assert_eq!(buffer.produce(&mut producer, &data).unwrap(), data.len());
-                assert_eq!(buffer.produce(&mut producer, &data).unwrap(), data.len());
-                assert_eq!(buffer.produce(&mut producer, &data).unwrap(), data.len());
-                assert_eq!(buffer.produce(&mut producer, &data).unwrap(), data.len());
-
-                // consume the whole buffer
-                assert!(buffer.len(&consumer) == 64);
-                buffer.consume(&mut consumer, |_buffer| 64);
-                assert!(buffer.len(&consumer) == 0);*/
-            });
-        });
-    }
-
-    #[test]
-    fn read_buffer_loop() {
-        ProducerToken::new(|mut producer| {
-            // create new `connections`
-            for _ in 0..100 {
-                ConsumerToken::new(|mut consumer| {
-                    let buffer = RingBuffer::<64>::new();
-                    let data = b"hello world";
-
-                    unimplemented!()
-
-                    /*assert_eq!(buffer.produce(&mut producer, data).unwrap(), data.len());
-
-                    // read the whole buffer
-                    buffer.consume(&mut consumer, |mut buffer| {
-                        let mut buf = [0u8; 16];
-                        let len = buffer.read(&mut buf).unwrap();
-
-                        assert_eq!(len, data.len());
-                        assert_eq!(buf[..len], data[..]);
-
-                        0
-                    });*/
-                });
-            }
-        });
-    }
-
-    #[test]
-    fn read_buffer() {
-        ProducerToken::new(|mut producer| {
-            ConsumerToken::new(|mut consumer| {
-                let buffer = RingBuffer::<64>::new();
-                let data = b"hello world";
-
-                unimplemented!()
-
-                /*assert_eq!(buffer.produce(&mut producer, data).unwrap(), data.len());
-
-                // read the whole buffer
-                buffer.consume(&mut consumer, |mut buffer| {
-                    let mut buf = [0u8; 16];
-                    let len = buffer.read(&mut buf).unwrap();
-
-                    assert_eq!(len, data.len());
-                    assert_eq!(buf[..len], data[..]);
-
-                    0
-                });*/
-            });
-        });
-    }
-
-    #[test]
-    fn read_full_buffer() {
-        ProducerToken::new(|mut producer| {
-            ConsumerToken::new(|mut consumer| {
-                let buffer = RingBuffer::<64>::new();
-                let data = [b'A'; 32];
-
-                unimplemented!()
-
-                /*assert_eq!(buffer.produce(&mut producer, &data).unwrap(), data.len());
-                assert_eq!(buffer.produce(&mut producer, &data).unwrap(), data.len());
-
-                // read the whole buffer
-                buffer.consume(&mut consumer, |mut buffer| {
-                    let mut buf = [0u8; 64];
-                    let len = buffer.read(&mut buf).unwrap();
-
-                    assert_eq!(len, data.len() * 2);
-                    assert_eq!(buf[..len / 2], data[..]);
-                    assert_eq!(buf[len / 2..len], data[..]);
-
-                    0
-                });*/
-            });
-        });
-    }
-
-    #[test]
-    fn read_buffer_two_times() {
-        ProducerToken::new(|mut producer| {
-            ConsumerToken::new(|mut consumer| {
-                let buffer = RingBuffer::<64>::new();
-                let data = b"hello world";
-
-                unimplemented!()
-
-                /*assert_eq!(buffer.produce(&mut producer, data).unwrap(), data.len());
-
-                // read the whole buffer
-                buffer.consume(&mut consumer, |mut buffer| {
-                    let mut buf = [0u8; 16];
-                    let len = buffer.read(&mut buf).unwrap();
-
-                    assert_eq!(len, data.len());
-                    assert_eq!(buf[..len], data[..]);
-
-                    0
-                });
-
-                // read the whole buffer a second time
-                buffer.consume(&mut consumer, |mut buffer| {
-                    let mut buf = [0u8; 16];
-                    let len = buffer.read(&mut buf).unwrap();
-
-                    assert_eq!(len, data.len());
-                    assert_eq!(buf[..len], data[..]);
-
-                    0
-                });*/
-            });
-        });
-    }
-
-    #[test]
-    fn read_buffer_two_times_but_consume() {
-        ProducerToken::new(|mut producer| {
-            ConsumerToken::new(|mut consumer| {
-                let buffer = RingBuffer::<64>::new();
-                let data = b"hello world";
-
-                unimplemented!()
-
-                /*assert_eq!(buffer.produce(&mut producer, data).unwrap(), data.len());
-
-                // read the whole buffer
-                buffer.consume(&mut consumer, |mut buffer| {
-                    let mut buf = [0u8; 16];
-                    let len = buffer.read(&mut buf).unwrap();
-
-                    assert_eq!(len, data.len());
-                    assert_eq!(buf[..len], data[..]);
-
-                    len
-                });
-
-                // read the whole buffer a second time
-                buffer.consume(&mut consumer, |mut buffer| {
-                    let mut buf = [0u8; 16];
-                    let len = buffer.read(&mut buf).unwrap();
-
-                    assert_eq!(len, 0);
-
-                    0
-                });*/
-            });
-        });
-    }
-
-    #[test]
-    fn read_buffer_multiple_times_wrapping() {
-        ProducerToken::new(|mut producer| {
-            ConsumerToken::new(|mut consumer| {
-                let buffer = RingBuffer::<32>::new();
-                const DATA: &[u8] = b"hello world";
-
-                unimplemented!()
-                /*std::thread::scope(|scope| {
-                    scope.spawn(|| {
-                        let mut count = 0;
-                        while count < 10 {
-                            if let Ok(bytes) = buffer.produce(&mut producer, DATA) {
-                                assert_eq!(bytes, DATA.len());
-                                count += 1
-                            }
-                        }
-                    });
-
-                    scope.spawn(|| {
-                        let mut count = 0;
-                        while count < 10 {
-                            buffer.consume(&mut consumer, |mut buffer| {
-                                let mut buf = [0u8; DATA.len()];
-                                let len = buffer.read(&mut buf).unwrap();
-
-                                if len == DATA.len() {
-                                    assert_eq!(&buf[..], DATA);
-                                    count += 1;
-                                    len
-                                } else {
-                                    0
-                                }
-                            });
-                        }
-                    });
-                });*/
-            });
-        });
-    }
+    use crate::Buffer;
 
     #[test]
     fn silly() {
@@ -777,72 +383,44 @@ mod test {
         const DATA: &[u8] = b"hello world";
         const ITERATIONS: usize = 100_000_000;
 
-        ProducerToken::new(|mut producer| {
-            ConsumerToken::new(|mut consumer| {
-                let buffer = RingBuffer::<SIZE>::new();
-                std::thread::scope(|scope| {
-                    scope.spawn(|| {
-                        for _ in 0..ITERATIONS {
-                            buffer.write_all(&mut producer, DATA).unwrap()
-                        }
-                    });
-                    scope.spawn(|| {
-                        let mut buf = [0u8; DATA.len()];
-                        for _ in 0..ITERATIONS {
-                            buffer.read_exact(&mut consumer, &mut buf).unwrap();
-                            assert!(buf == DATA);
-                        }
-                    });
+        Buffer::<SIZE>::new(|producer, consumer| {
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    for _ in 0..ITERATIONS {
+                        producer.write_all(DATA).unwrap()
+                    }
                 });
-            });
-        });
-    }
-
-    #[test]
-    fn long_wait() {
-        const SIZE: usize = 32;
-        const DATA: &[u8] = b"hello world";
-
-        ProducerToken::new(|mut producer| {
-            ConsumerToken::new(|mut consumer| {
-                let buffer = RingBuffer::<SIZE>::new();
-                std::thread::scope(|scope| {
-                    scope.spawn(|| {
-                        std::thread::sleep(std::time::Duration::from_secs(10));
-                        buffer.write_all(&mut producer, DATA).unwrap()
-                    });
-                    scope.spawn(|| {
-                        let mut buf = [0u8; DATA.len()];
-                        buffer.read_exact(&mut consumer, &mut buf).unwrap();
+                scope.spawn(|| {
+                    let mut buf = [0u8; DATA.len()];
+                    for _ in 0..ITERATIONS {
+                        consumer.read_exact(&mut buf).unwrap();
                         assert!(buf == DATA);
-                    });
+                    }
                 });
             });
         });
     }
 
     #[test]
-    #[should_panic]
-    fn consume_more_than_available_data() {
-        ProducerToken::new(|mut producer| {
-            ConsumerToken::new(|mut consumer| {
-                let buffer = RingBuffer::<64>::new();
-                let data = b"hello world";
+    fn intended() {
+        const SIZE: usize = 8;
+        const DATA: &[u8] = b"hello world";
+        const ITERATIONS: usize = 10_000_000;
 
-                unimplemented!()
-            });
-        });
-    }
-
-    #[test]
-    #[should_panic]
-    fn consume_more_than_available_capacity() {
-        ProducerToken::new(|mut producer| {
-            ConsumerToken::new(|mut consumer| {
-                let buffer = RingBuffer::<64>::new();
-                let data = b"hello world";
-
-                unimplemented!()
+        Buffer::<SIZE>::new(|producer, consumer| {
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    for _ in 0..ITERATIONS {
+                        producer.write_all(DATA).unwrap()
+                    }
+                });
+                scope.spawn(|| {
+                    let mut buf = [0u8; DATA.len()];
+                    for _ in 0..ITERATIONS {
+                        consumer.read_exact(&mut buf).unwrap();
+                        assert!(buf == DATA);
+                    }
+                });
             });
         });
     }
