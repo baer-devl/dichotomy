@@ -1,5 +1,6 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use dichotomy::*;
+use std::io::{Read, Write};
 
 fn async_multi_rw_1m() {
     const BUF_SIZE: usize = 1024;
@@ -11,7 +12,11 @@ fn async_multi_rw_1m() {
         // producer
         scope.spawn(|| {
             for _ in 0..ITERATIONS {
-                producer.write_blocking(DATA).unwrap()
+                let mut written = 0;
+                while written < DATA.len() {
+                    let bytes = producer.write(&DATA[written..]).unwrap();
+                    written += bytes;
+                }
             }
         });
 
@@ -19,7 +24,11 @@ fn async_multi_rw_1m() {
         scope.spawn(|| {
             let mut buf = [0u8; DATA.len()];
             for _ in 0..ITERATIONS {
-                consumer.read_blocking(&mut buf).unwrap();
+                let mut read = 0;
+                while read < DATA.len() {
+                    let bytes = consumer.read(&mut buf[read..]).unwrap();
+                    read += bytes;
+                }
                 assert!(DATA == buf)
             }
         });

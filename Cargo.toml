@@ -1,11 +1,9 @@
 [package]
 name = "dichotomy"
+author = ["baer <gerald.schoiber@ins.jku.at"]
 version = "0.1.0"
 edition = "2021"
 
-[features]
-default = []
-blocking = []
 
 [profile.release]
 strip = true

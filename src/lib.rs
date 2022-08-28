@@ -1,3 +1,70 @@
+//! Dichotomy is a lock-free binary ring buffer
+//!
+//! The buffer itself does not use any locks like `Mutex` or `RwLock`, nor make use of atomics. The
+//! two parts, `Producer` and `Consumer` are guranteed to have mutual exclusive access to the part
+//! of the buffer they need access to. Thus makes the buffer very performant as it does not need to
+//! handle locks.
+//!
+//! There are two tags used to handle the internal access to the buffer called `zero_tag` and
+//! `last_tag`. Both will hold an index and a state. The index will give the position of the start
+//! and the end of written data. The state ensures that the `Consumer` part does have the
+//! information if there is more to read from. The `zero_tag` can only be written by the `Consumer`
+//! and the `last_tag` can only be written by the `Producer`. This and the fact that the processort
+//! _should_ be able to read an usize in a single instruction, makes it safe to access those values
+//! without locks.
+//!
+//! # Deep dive
+//! Lets first focus on the index part of the tags.
+//! The `Producer` holds its index in the `last_tag` which marks the beginning of the free buffer.
+//! If there is space left in the buffer, it will write into it and update the index.
+//! The very same is true for the `Consumer`, who holds its index in the `zero_tag`, indicating the
+//! beginning of readable data. If the data gets consumed, it will update the index and free space
+//! on the buffer.
+//! If both indicies are the same, this could either mean that the buffer is empty of full. To make
+//! a distinction of those two possibilities, we are using the state part of the tags which is an
+//! incrementing number changed by each write to the buffer.
+//! If the `Consumer` check if the buffer has data to read from, it will check if the tags will
+//! differ. If that is the case, the index of both values will be used to calculate the readable
+//! size of the data. Each time the `Consumer` reads data from the buffer, it will update its state
+//! to the last known state of the `Producer` tag. This ensures that there will never be a false
+//! empty buffer because the state will always be different after the `Producer` wrote new data.
+//! Here are some examples of possible states of the two tags:
+//!
+//! ## Empty buffer
+//! |--------X------------|
+//!
+//! 'X' representing both indicies of the tags which pointing to the same position. In this special
+//! case, the state of both tags have to be the same. Thus makes it easy to check, if both tags are
+//! the same, the buffer is empty.
+//!
+//! ## Filled buffer
+//! |----Z**********L-----|
+//!
+//! 'Z' representing the index of `zero_tag` and 'L' representing the index of `last_tag`. As both
+//! indicies are different, it is safe to assume that there is data to read from and free space to
+//! write to. Both, the free space and the filled spaces can easily calculated.
+//!
+//! ## Full buffer
+//! |*****************X***|
+//!
+//! 'X' representing both indicies of the tags pointing to the same position. However, this time
+//! the state of the tags differ which indicates that the buffer must be full.
+//!
+//! # Safety
+//! The whole safety of this implementation relies on the fact that the processor can read an usize
+//! value with a single instruction. However, there are processor implementations which do not work
+//! like this. Given that they are rare we still recommend to double check if your processor can
+//! read a single usize in one instruction.
+//!
+//! # Limits
+//! As we are using the usize value as two different parts, the maximum amount of elements in this
+//! buffer is limited by the architecture it runs on. For a 64 bit architecture it will be 32 bits.
+//! On a 32 bit architecture this will be 16 bits. We handle those two variants in our
+//! implementation.
+//!
+//!
+//! # Features
+//! This is the part where we talk about features.
 use helper::BufferHelper;
 use std::{
     cell::UnsafeCell,
@@ -34,18 +101,6 @@ impl<const N: usize> Producer<N> {
     /// Return if the buffer is currently full
     pub fn is_full(&self) -> bool {
         !self.buffer.is_empty()
-    }
-
-    /// Write until the whole data is written to the buffer
-    ///
-    /// # Safety
-    /// Although this is working as intended, keep in mind that this will use a spin-loop until the
-    /// data is written. If you cannot gurantee that the `Consumer` part will consume the buffer in
-    /// reasonable time, you should _not_ use this function!
-    /// Instead, use `write` and handle the blocking part yourself.
-    #[cfg(feature = "blocking")]
-    pub fn write_blocking(&mut self, data: &[u8]) -> std::io::Result<()> {
-        self.buffer.write_all(data)
     }
 
     /// Return if `Consumer` part still exists
@@ -91,18 +146,6 @@ impl<const N: usize> Consumer<N> {
         self.buffer.is_empty()
     }
 
-    /// Read until the provided buffer is full
-    ///
-    /// # Safety
-    /// Although this is working as intended, keep in mind that this will use a spin-loop until the
-    /// data is read. If you cannot gurantee that the `Producer` part will write to the buffer in
-    /// reasonable time, you should _not_ use this function!
-    /// Instead, use `read` and handle the blocking part yourself.
-    #[cfg(feature = "blocking")]
-    pub fn read_blocking(&mut self, buffer: &mut [u8]) -> std::io::Result<()> {
-        self.buffer.read_exact(buffer)
-    }
-
     /// Return if `Producer` part still exists
     /// FIXME: should we internal check if the buffer parts still exists?
     pub fn does_producer_still_exist(&self) -> bool {
@@ -117,64 +160,7 @@ impl<const N: usize> Read for Consumer<N> {
     }
 }
 
-/// Dichotomy is a lock-free binary ring buffer
-///
-/// The buffer itself does not use any locks like `Mutex` or `RwLock`, nor make use of atomics. The
-/// two parts, `Producer` and `Consumer` are guranteed to have mutual exclusive access to the part
-/// of the buffer they need access to. Thus makes the buffer very performant as it does not need to
-/// handle locks.
-///
-/// There are two tags used to handle the internal access to the buffer called `zero_tag` and
-/// `last_tag`. Both will hold an index and a state. The index will give the position of the start
-/// and the end of written data. The state ensures that the `Consumer` part does have the
-/// information if there is more to read from. The `zero_tag` can only be written by the `Consumer`
-/// and the `last_tag` can only be written by the `Producer`. This and the fact that the processort
-/// _should_ be able to read an usize in a single instruction, makes it safe to access those values
-/// without locks.
-///
-/// # Deep dive
-/// Lets first focus on the index part of the tags.
-/// The `Producer` holds its index in the `last_tag` which marks the beginning of the free buffer.
-/// If there is space left in the buffer, it will write into it and update the index.
-/// The very same is true for the `Consumer`, who holds its index in the `zero_tag`, indicating the
-/// beginning of readable data. If the data gets consumed, it will update the index and free space
-/// on the buffer.
-/// If both indicies are the same, this could either mean that the buffer is empty of full. To make
-/// a distinction of those two possibilities, we are using the state part of the tags which is an
-/// incrementing number changed by each write to the buffer.
-/// If the `Consumer` check if the buffer has data to read from, it will check if the tags will
-/// differ. If that is the case, the index of both values will be used to calculate the readable
-/// size of the data. Each time the `Consumer` reads data from the buffer, it will update its state
-/// to the last known state of the `Producer` tag. This ensures that there will never be a false
-/// empty buffer because the state will always be different after the `Producer` wrote new data.
-/// Here are some examples of possible states of the two tags:
-///
-/// ## Empty buffer
-/// |--------X------------|
-/// 'X' representing both indicies of the tags which pointing to the same position. In this special
-/// case, the state of both tags have to be the same. Thus makes it easy to check, if both tags are
-/// the same, the buffer is empty.
-///
-/// ## Filled buffer
-/// |----Z**********L-----|
-/// 'Z' representing the index of `zero_tag` and 'L' representing the index of `last_tag`. As both
-/// indicies are different, it is safe to assume that there is data to read from and free space to
-/// write to. Both, the free space and the filled spaces can easily calculated.
-///
-/// ## Full buffer
-/// |*****************X***|
-/// 'X' representing both indicies of the tags pointing to the same position. However, this time
-/// the state of the tags differ which indicates that the buffer must be full.
-///
-/// # Safety
-/// The whole safety of this implementation relies on the fact that the processor can read an usize
-/// value with a single instruction. However, there are processor implementations which do not work
-/// like this. Given that they are rare we still recommend to double check if your processor can
-/// read a single usize in one instruction.
-/// As we are using the usize value as two different parts, the maximum amount of elements in this
-/// buffer is limited by the architecture it runs on. For a 64 bit architecture it will be 32 bits.
-/// On a 32 bit architecture this will be 16 bits. We handle those two variants in our
-/// implementation.
+/// Lock-free binary buffer without locks or atomic operations for synchronization
 pub struct Buffer<const N: usize> {
     /// Internal buffer accessed by `Producer` and `Consumer`
     ///
@@ -212,6 +198,7 @@ impl<const N: usize> Buffer<N> {
     /// # Example
     /// ```
     /// use dichotomy::Buffer;
+    /// use std::io::{Read, Write};
     ///
     /// const DATA: &[u8] = b"hello world";
     ///
@@ -220,12 +207,20 @@ impl<const N: usize> Buffer<N> {
     ///     // spawn consumer thread
     ///     let mut buf = [0u8; 32];
     ///     for _ in 0..10 {
-    ///         consumer.read_blocking(&mut buf[..DATA.len()]).unwrap();
+    ///         let mut read = 0;
+    ///         while read < DATA.len() {
+    ///             let bytes = consumer.read(&mut buf[..DATA.len()]).unwrap();
+    ///             read += bytes;
+    ///         }
     ///     }
     /// });
     ///
     /// for _ in 0..10 {
-    ///     producer.write_blocking(DATA).unwrap();
+    ///     let mut written = 0;
+    ///     while written < DATA.len() {
+    ///         let bytes = producer.write(DATA[written..]).unwrap();
+    ///         written += bytes;
+    ///     }
     /// }
     /// ```
     #[cfg(target_arch = "x86_64")]
@@ -374,107 +369,6 @@ impl<const N: usize> Buffer<N> {
                 }
             }
             Err(_last_tag) => Ok(0),
-        }
-    }
-}
-
-/// Internal Read/Write implementations used by `Producer` and `Consumer` respectively
-impl<const N: usize> Buffer<N> {
-    /// Write to the buffer until the provided data is on the buffer
-    ///
-    /// This function will block until the provided data will be written to the buffer.
-    ///
-    /// # Safety
-    /// If the `Consumer` gets dropped while we are still trying to write to the buffer, this function
-    /// will _never_ return. Use with caution!
-    ///
-    /// # Performance
-    /// Internally, this will use a spin loop to block which should only be used if you can ensure that
-    /// the `Consumer` will free the buffer in reasonable time.
-    #[cfg(feature = "blocking")]
-    #[inline]
-    fn write_all(&self, buf: &[u8]) -> std::io::Result<()> {
-        let mut written = 0;
-
-        loop {
-            match self.get_writeable_buffer() {
-                Ok((index, state, mut buffer)) => {
-                    // write from buffer
-                    let bytes = buffer.write(&buf[written..])?;
-
-                    // ensure we wrote something
-                    if bytes > 0 {
-                        // update end value
-                        let state = state + 1;
-                        let index = (index + bytes) % N;
-                        let end = index << 32 | state;
-
-                        // set new value
-                        unsafe { *self.last_tag.get() = end };
-
-                        // return if we wrote all bytes
-                        written += bytes;
-                        if written == buf.len() {
-                            return Ok(());
-                        }
-                    }
-                }
-                Err(data_start) => {
-                    // if consumer change the index we can write again
-                    while unsafe { *self.zero_tag.get() == data_start } {
-                        std::hint::spin_loop();
-                    }
-                }
-            }
-        }
-    }
-
-    /// Read from the buffer until the provided buffer is full
-    ///
-    /// This function will block until the provided buffer is full.
-    ///
-    /// # Safety
-    /// If the `Producer` gets dropped while we are still trying to read from the buffer, this
-    /// function will _never_ return. Use with caution!
-    ///
-    /// # Performance
-    /// Internally, this will use a spin loop to block which should only be used if you can ensure
-    /// that the `Producer` will write onto the buffer in reasonable time.
-    #[cfg(feature = "blocking")]
-    #[inline]
-    fn read_exact(&self, buf: &mut [u8]) -> std::io::Result<()> {
-        let mut read = 0;
-
-        loop {
-            match self.get_readable_buffer() {
-                Ok((zero_index, last_state, mut buffer)) => {
-                    // read to buffer
-                    let bytes = buffer.read(&mut buf[read..])?;
-
-                    // ensure we read something
-                    if bytes > 0 {
-                        // set new value
-                        let state = last_state;
-                        let index = (zero_index + bytes) % N;
-                        let start = index << 32 | state;
-
-                        // new value
-                        unsafe { *self.zero_tag.get() = start };
-
-                        // return if we read all bytes from the buffer
-                        read += bytes;
-                        if read == buf.len() {
-                            return Ok(());
-                        }
-                    }
-                }
-                Err(last_tag) => {
-                    // if producer wrote new data we can read again
-                    while unsafe { *self.last_tag.get() == last_tag } {
-                        std::hint::spin_loop();
-                    }
-                }
-            }
         }
     }
 }
