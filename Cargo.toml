@@ -3,6 +3,12 @@ name = "dichotomy"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+blocking = []
+
+[profile.release]
+strip = true
 
 [dev-dependencies]
 criterion = "0.3.6"
