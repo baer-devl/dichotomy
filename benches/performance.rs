@@ -8,31 +8,29 @@ fn async_multi_rw_1m() {
     const ITERATIONS: usize = 1_000_000;
 
     let (mut producer, mut consumer) = Buffer::<BUF_SIZE>::new();
-    std::thread::scope(|scope| {
-        // producer
-        scope.spawn(|| {
-            for _ in 0..ITERATIONS {
-                let mut written = 0;
-                while written < DATA.len() {
-                    let bytes = producer.write(&DATA[written..]).unwrap();
-                    written += bytes;
-                }
-            }
-        });
-
+    let t = std::thread::spawn(move || {
         // consumer
-        scope.spawn(|| {
-            let mut buf = [0u8; DATA.len()];
-            for _ in 0..ITERATIONS {
-                let mut read = 0;
-                while read < DATA.len() {
-                    let bytes = consumer.read(&mut buf[read..]).unwrap();
-                    read += bytes;
-                }
-                assert!(DATA == buf)
+        let mut buf = [0u8; DATA.len()];
+        for _ in 0..ITERATIONS {
+            let mut read = 0;
+            while read < DATA.len() {
+                let bytes = consumer.read(&mut buf[read..]).unwrap();
+                read += bytes;
             }
-        });
+            assert!(DATA == buf)
+        }
     });
+
+    // producer
+    for _ in 0..ITERATIONS {
+        let mut written = 0;
+        while written < DATA.len() {
+            let bytes = producer.write(&DATA[written..]).unwrap();
+            written += bytes;
+        }
+    }
+
+    t.join().unwrap();
 }
 
 fn criterion_benchmark(c: &mut Criterion) {

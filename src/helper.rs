@@ -1,8 +1,6 @@
 use std::io::{Read, Write};
 
 /// Wrapper around internal buffer which handles wrapping read/writes
-///
-///
 pub(crate) struct BufferHelper<'a>(pub(crate) &'a mut [u8], pub(crate) &'a mut [u8]);
 
 impl<'a> BufferHelper<'a> {

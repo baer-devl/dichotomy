@@ -72,6 +72,7 @@ use std::{
     sync::Arc,
 };
 
+/// Ring buffer abstraction helper
 mod helper;
 
 #[cfg(test)]
@@ -104,7 +105,7 @@ impl<const N: usize> Producer<N> {
     }
 
     /// Return if `Consumer` part still exists
-    pub fn does_consumer_still_exist(&self) -> bool {
+    pub fn is_consumer_available(&self) -> bool {
         Arc::weak_count(&self.buffer) > 1
     }
 }
@@ -147,8 +148,7 @@ impl<const N: usize> Consumer<N> {
     }
 
     /// Return if `Producer` part still exists
-    /// FIXME: should we internal check if the buffer parts still exists?
-    pub fn does_producer_still_exist(&self) -> bool {
+    pub fn is_producer_available(&self) -> bool {
         Arc::weak_count(&self.buffer) > 1
     }
 }
@@ -191,8 +191,12 @@ impl<const N: usize> Buffer<N> {
     /// # Panics
     /// Ensure that the size of the buffer do not exceed the maximum supported size for your
     /// architecture. If it does, it will panic!
-    /// For a 64 bit architecture the maximum size will be `u32::MAX` and for a 32 bit architecture
-    /// it will be `u16::MAX`.
+    ///
+    /// | Pointer width | buffer size  |
+    /// |:-------------:|:------------:|
+    /// | `64 bit`      | `32 bit`     |
+    /// | `32 bit`      | `16 bit`     |
+    /// | `16 bit`      |  `8 bit`     |
     ///
     ///
     /// # Example
@@ -218,29 +222,21 @@ impl<const N: usize> Buffer<N> {
     /// for _ in 0..10 {
     ///     let mut written = 0;
     ///     while written < DATA.len() {
-    ///         let bytes = producer.write(DATA[written..]).unwrap();
+    ///         let bytes = producer.write(&DATA[written..]).unwrap();
     ///         written += bytes;
     ///     }
     /// }
     /// ```
-    #[cfg(target_arch = "x86_64")]
     pub fn new() -> (Producer<N>, Consumer<N>) {
         // ensure that the size does not exceed the maximum allowed size for a 64 bit system
-        assert!(N <= u32::MAX as usize);
-
-        let buffer = Self {
-            buffer: UnsafeCell::new([0u8; N]),
-            zero_tag: UnsafeCell::default(),
-            last_tag: UnsafeCell::default(),
-        };
-
-        buffer.split()
-    }
-
-    #[cfg(target_arch = "x86")]
-    pub fn new() -> (Producer<N>, Consumer<N>) {
+        #[cfg(target_pointer_width = "64")]
+        assert!(u32::try_from(N).is_ok());
         // ensure that the size does not exceed the maximum allowed size for a 32 bit system
-        assert!(N <= u16::MAX as usize);
+        #[cfg(target_pointer_width = "32")]
+        assert!(u16::try_from(N).is_ok());
+        // ensure that the size does not exceed the maximum allowed size for a 16 bit system
+        #[cfg(target_pointer_width = "16")]
+        assert!(u8::try_from(N).is_ok());
 
         let buffer = Self {
             buffer: UnsafeCell::new([0u8; N]),
