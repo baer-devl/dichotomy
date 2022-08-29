@@ -1,11 +1,16 @@
 [package]
 name = "dichotomy"
+authors = ["baer <gerald.schoiber@ins.jku.at"]
 version = "0.1.0"
 edition = "2021"
 
 
+[profile.release]
+strip = true
+
 [dev-dependencies]
 criterion = "0.3.6"
+rand = "0.8.5"
 
 [[bench]]
 name = "performance"
