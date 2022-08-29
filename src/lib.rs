@@ -101,12 +101,12 @@ impl<const N: usize> Producer<N> {
 
     /// Return if the buffer is currently full
     pub fn is_full(&self) -> bool {
-        !self.buffer.is_empty()
+        self.buffer.is_full()
     }
 
     /// Return if `Consumer` part still exists
     pub fn is_consumer_available(&self) -> bool {
-        Arc::weak_count(&self.buffer) > 1
+        Arc::strong_count(&self.buffer) > 1
     }
 }
 
@@ -149,7 +149,7 @@ impl<const N: usize> Consumer<N> {
 
     /// Return if `Producer` part still exists
     pub fn is_producer_available(&self) -> bool {
-        Arc::weak_count(&self.buffer) > 1
+        Arc::strong_count(&self.buffer) > 1
     }
 }
 
@@ -192,11 +192,11 @@ impl<const N: usize> Buffer<N> {
     /// Ensure that the size of the buffer do not exceed the maximum supported size for your
     /// architecture. If it does, it will panic!
     ///
-    /// | Pointer width | buffer size  |
-    /// |:-------------:|:------------:|
-    /// | `64 bit`      | `32 bit`     |
-    /// | `32 bit`      | `16 bit`     |
-    /// | `16 bit`      |  `8 bit`     |
+    /// | Pointer width | buffer size |
+    /// |:-------------:|:-----------:|
+    /// | `64 bit`      | `32 bit`    |
+    /// | `32 bit`      | `16 bit`    |
+    /// | `16 bit`      |  `8 bit`    |
     ///
     ///
     /// # Example
@@ -290,6 +290,31 @@ impl<const N: usize> Buffer<N> {
 
         // check if buffer is empty
         zero_tag == last_tag
+    }
+
+    /// Return if the buffer is currently full
+    #[inline]
+    fn is_full(&self) -> bool {
+        let zero_tag = unsafe { *self.zero_tag.get() };
+        let last_tag = unsafe { *self.last_tag.get() };
+
+        // check if buffer is empty
+        if zero_tag == last_tag {
+            return false;
+        }
+
+        let zero_index = zero_tag >> 32;
+        let zero_state = zero_tag & 0x00ff_ffff;
+
+        let last_index = last_tag >> 32;
+        let last_state = last_tag & 0x00ff_ffff;
+
+        // check if buffer is full
+        if zero_index == last_index && zero_state != last_state {
+            true
+        } else {
+            false
+        }
     }
 }
 
