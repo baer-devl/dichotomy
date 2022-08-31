@@ -1,65 +1,77 @@
 /// Wrapper around internal buffer which handles wrapping read/writes
-pub(crate) struct BufferHelper<const N: usize> {
-    pub buffer0: *mut u8,
-    pub buffer1: *mut u8,
-    len0: usize,
-    len1: usize,
+pub(crate) struct BufferHelper<'a, const N: usize> {
+    pub buffer0: &'a mut [u8],
+    pub buffer1: &'a mut [u8],
+    len: usize,
 }
 
-impl<const N: usize> BufferHelper<N> {
-    pub(crate) fn new(buffer0: *mut u8, buffer1: *mut u8, len0: usize, len1: usize) -> Self {
+impl<'a, const N: usize> BufferHelper<'a, N> {
+    pub(crate) fn new(buffer0: &'a mut [u8], buffer1: &'a mut [u8]) -> Self {
+        let len = buffer0.len() + buffer1.len();
         Self {
             buffer0,
             buffer1,
-            len0,
-            len1,
+            len,
         }
     }
 
     /// Size of the accessable buffer
     #[inline]
     pub(crate) fn len(&self) -> usize {
-        self.len0 + self.len1
+        self.len
     }
 
     #[inline]
     pub(crate) fn read(&mut self, buf: &mut [u8]) -> usize {
         // read from first buffer
         let buf_len = buf.len();
-        let bytes = std::cmp::min(buf_len, self.len0);
+        let bytes = std::cmp::min(buf_len, self.buffer0.len());
 
         if bytes > 0 {
             // actual copy
-            let src_ptr = self.buffer0;
-            let dst_ptr = buf.as_mut_ptr();
-            unsafe { dst_ptr.copy_from_nonoverlapping(src_ptr, bytes) };
+            buf[..bytes].copy_from_slice(&self.buffer0[..bytes]);
 
             // remove data from buffer
-            self.len0 -= bytes;
-            self.buffer0 = unsafe { self.buffer0.add(bytes) };
+            self.buffer0 = unsafe {
+                std::slice::from_raw_parts_mut(
+                    self.buffer0[bytes..].as_mut_ptr(),
+                    self.buffer0.len() - bytes,
+                )
+            };
 
             // check fast-path
             if buf_len == bytes {
+                // update len
+                self.len -= bytes;
+
                 // nothing more to read
                 return bytes;
             }
         }
 
         // read more on second buffer
-        let bytes1 = std::cmp::min(buf_len - bytes, self.len1);
+        let bytes1 = std::cmp::min(buf_len - bytes, self.buffer1.len());
 
         if bytes1 > 0 {
             // actual copy
-            let src_ptr = self.buffer1;
-            let dst_ptr = unsafe { buf.as_mut_ptr().add(bytes) };
-            unsafe { dst_ptr.copy_from_nonoverlapping(src_ptr, bytes1) };
+            buf[bytes..bytes + bytes1].copy_from_slice(&self.buffer1[..bytes1]);
 
             // remove data from buffer
-            self.len1 -= bytes1;
-            self.buffer1 = unsafe { self.buffer1.add(bytes1) };
+            self.buffer1 = unsafe {
+                std::slice::from_raw_parts_mut(
+                    self.buffer1[bytes1..].as_mut_ptr(),
+                    self.buffer1.len() - bytes1,
+                )
+            };
+
+            // update len
+            self.len -= bytes + bytes1;
 
             bytes + bytes1
         } else {
+            // update len
+            self.len -= bytes;
+
             bytes
         }
     }
@@ -68,39 +80,52 @@ impl<const N: usize> BufferHelper<N> {
     pub(crate) fn write(&mut self, buf: &[u8]) -> usize {
         // write to the first buffer
         let buf_len = buf.len();
-        let bytes = std::cmp::min(buf_len, self.len0);
+        let bytes = std::cmp::min(buf_len, self.buffer0.len());
 
         if bytes > 0 {
             // actual copy
-            let src_ptr = buf.as_ptr();
-            let dst_ptr = self.buffer0;
-            unsafe { dst_ptr.copy_from_nonoverlapping(src_ptr, bytes) };
+            self.buffer0[..bytes].copy_from_slice(&buf[..bytes]);
 
             // remove data from buffer
-            self.len0 -= bytes;
-            self.buffer0 = unsafe { self.buffer0.add(bytes) };
+            self.buffer0 = unsafe {
+                std::slice::from_raw_parts_mut(
+                    self.buffer0[bytes..].as_mut_ptr(),
+                    self.buffer0.len() - bytes,
+                )
+            };
 
             // return if we wrote all of the buffer
             if bytes == buf_len {
+                // update len
+                self.len -= bytes;
+
                 return bytes;
             }
         }
 
         // write to the second buffer
-        let bytes1 = std::cmp::min(buf_len - bytes, self.len1);
+        let bytes1 = std::cmp::min(buf_len - bytes, self.buffer1.len());
 
         if bytes1 > 0 {
             // actual copy
-            let src_ptr = unsafe { buf.as_ptr().add(bytes) };
-            let dst_ptr = self.buffer1;
-            unsafe { dst_ptr.copy_from_nonoverlapping(src_ptr, bytes1) };
+            self.buffer1[..bytes1].copy_from_slice(&buf[bytes..bytes + bytes1]);
 
             // remove data from buffer
-            self.len1 -= bytes1;
-            self.buffer1 = unsafe { self.buffer1.add(bytes1) };
+            self.buffer1 = unsafe {
+                std::slice::from_raw_parts_mut(
+                    self.buffer1[bytes1..].as_mut_ptr(),
+                    self.buffer1.len() - bytes1,
+                )
+            };
+
+            // update len
+            self.len -= bytes + bytes1;
 
             bytes + bytes1
         } else {
+            // update len
+            self.len -= bytes;
+
             bytes
         }
     }
