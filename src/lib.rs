@@ -69,7 +69,6 @@ use helper::BufferHelper;
 use std::{
     cell::UnsafeCell,
     io::{Read, Write},
-    marker::PhantomData,
     sync::Arc,
 };
 
@@ -85,19 +84,20 @@ mod tests;
 /// It is safe to move this instance into other threads as the `Arc` ensures that the underlaying
 /// buffer does exist. However, if the `Consumer` part is dropped and the buffer is full, it will
 /// not be possible to write more data to the buffer.
-pub struct Producer<'a, const N: usize> {
-    buffer: Arc<Buffer<'a, N>>,
-    cache: BufferHelper,
+pub struct Producer<const N: usize> {
+    buffer: Arc<Buffer<N>>,
+    cache: BufferHelper<N>,
     index: usize,
     state: usize,
+    zero_tag: usize,
 }
 
 /// This is safe because we are using `Arc` to share the underlaying buffer
-unsafe impl<const N: usize> Send for Producer<'_, N> {}
+unsafe impl<const N: usize> Send for Producer<N> {}
 /// This is safe because we are using `Arc` to share the underlaying buffer
-unsafe impl<const N: usize> Sync for Producer<'_, N> {}
+unsafe impl<const N: usize> Sync for Producer<N> {}
 
-impl<const N: usize> Producer<'_, N> {
+impl<const N: usize> Producer<N> {
     /// Return the current length of the buffer
     pub fn len(&self) -> usize {
         self.buffer.len()
@@ -115,22 +115,26 @@ impl<const N: usize> Producer<'_, N> {
 }
 
 /// Implement `Write` to make it easy to write to the buffer
-impl<const N: usize> Write for Producer<'_, N> {
+impl<const N: usize> Write for Producer<N> {
+    #[inline]
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         // update cache
-        if buf.len() > self.cache.len() {
-            match self.buffer.get_writeable_buffer() {
-                Some((index, state, buffer)) => {
+        if self.cache.len() == 0 {
+            match self.buffer.get_writeable_buffer(self.zero_tag) {
+                Ok((index, state, buffer)) => {
                     self.cache = buffer;
                     self.index = index;
                     self.state = state;
                 }
-                None => return Ok(0),
+                Err(zero_tag) => {
+                    self.zero_tag = zero_tag;
+                    return Ok(0);
+                }
             }
         }
 
         // write from buffer
-        let bytes = self.cache.write(buf)?;
+        let bytes = self.cache.write(buf);
 
         // ensure we wrote something
         if bytes > 0 {
@@ -148,6 +152,7 @@ impl<const N: usize> Write for Producer<'_, N> {
         }
     }
 
+    #[inline]
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
@@ -159,19 +164,20 @@ impl<const N: usize> Write for Producer<'_, N> {
 /// It is safe to move this instance into other threads as the `Arc` ensures that the underlaying
 /// buffer does exist. However, if the `Producer` part is dropped and the buffer is empty, it will
 /// not be possible to read more data from the buffer.
-pub struct Consumer<'a, const N: usize> {
-    buffer: Arc<Buffer<'a, N>>,
-    cache: BufferHelper,
+pub struct Consumer<const N: usize> {
+    buffer: Arc<Buffer<N>>,
+    cache: BufferHelper<N>,
     index: usize,
     state: usize,
+    last_tag: usize,
 }
 
 /// This is safe because we are using `Arc` to share the underlaying buffer
-unsafe impl<const N: usize> Send for Consumer<'_, N> {}
+unsafe impl<const N: usize> Send for Consumer<N> {}
 /// This is safe because we are using `Arc` to share the underlaying buffer
-unsafe impl<const N: usize> Sync for Consumer<'_, N> {}
+unsafe impl<const N: usize> Sync for Consumer<N> {}
 
-impl<const N: usize> Consumer<'_, N> {
+impl<const N: usize> Consumer<N> {
     /// Return the current length of the buffer
     pub fn len(&self) -> usize {
         self.buffer.len()
@@ -189,22 +195,26 @@ impl<const N: usize> Consumer<'_, N> {
 }
 
 /// Implement `Read` to make it easy to read from the buffer
-impl<const N: usize> Read for Consumer<'_, N> {
+impl<const N: usize> Read for Consumer<N> {
+    #[inline]
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         // update cache
-        if buf.len() > self.cache.len() {
-            match self.buffer.get_readable_buffer() {
-                Some((index, state_end, buffer)) => {
+        if self.cache.len() == 0 {
+            match self.buffer.get_readable_buffer(self.last_tag) {
+                Ok((index, state_end, buffer)) => {
                     self.cache = buffer;
                     self.index = index;
                     self.state = state_end;
                 }
-                None => return Ok(0),
+                Err(last_tag) => {
+                    self.last_tag = last_tag;
+                    return Ok(0);
+                }
             }
         }
 
         // read to buffer
-        let bytes = self.cache.read(buf)?;
+        let bytes = self.cache.read(buf);
 
         // ensure we read something
         if bytes > 0 {
@@ -223,7 +233,7 @@ impl<const N: usize> Read for Consumer<'_, N> {
 }
 
 /// Lock-free binary buffer without locks or atomic operations for synchronization
-pub struct Buffer<'a, const N: usize> {
+pub struct Buffer<const N: usize> {
     /// Internal buffer accessed by `Producer` and `Consumer`
     ///
     /// Both parts will _always_ have mutual exclusive access their corresponding parts which makes
@@ -239,12 +249,10 @@ pub struct Buffer<'a, const N: usize> {
     ///
     /// This field can only be changed by the `Producer`. The `Consumer` is only allowed to read.
     last_tag: UnsafeCell<usize>,
-
-    _marker: PhantomData<&'a ()>,
 }
 
 #[cfg(target_pointer_width = "64")]
-impl<'a, const N: usize> Buffer<'a, N> {
+impl<const N: usize> Buffer<N> {
     /// Create a new `Buffer` instance
     ///
     /// Creating a new Buffer will give you the `Producer` and `Consumer` parts. Each of them can
@@ -291,7 +299,7 @@ impl<'a, const N: usize> Buffer<'a, N> {
     ///     }
     /// }
     /// ```
-    pub fn new() -> (Producer<'a, N>, Consumer<'a, N>) {
+    pub fn new() -> (Producer<N>, Consumer<N>) {
         // ensure that the size does not exceed the maximum allowed size for a 64 bit system
         #[cfg(target_pointer_width = "64")]
         assert!(u32::try_from(N).is_ok());
@@ -306,7 +314,6 @@ impl<'a, const N: usize> Buffer<'a, N> {
             buffer: UnsafeCell::new([0u8; N]),
             zero_tag: UnsafeCell::default(),
             last_tag: UnsafeCell::default(),
-            _marker: PhantomData::default(),
         };
 
         buffer.split()
@@ -314,7 +321,7 @@ impl<'a, const N: usize> Buffer<'a, N> {
 }
 
 /// Functions which are used by both, the `Producer` and the `Consumer`
-impl<const N: usize> Buffer<'_, N> {
+impl<const N: usize> Buffer<N> {
     /// Return the current length of the data on the buffer
     #[inline]
     fn len(&self) -> usize {
@@ -375,17 +382,13 @@ impl<const N: usize> Buffer<'_, N> {
         let last_state = last_tag & 0x00ff_ffff;
 
         // check if buffer is full
-        if zero_index == last_index && zero_state != last_state {
-            true
-        } else {
-            false
-        }
+        zero_index == last_index && zero_state != last_state
     }
 }
 
 // internal calls for producer / consumer
 /// Internal functions which gets exposed by the `Producer` and `Consumer` respectively
-impl<const N: usize> Buffer<'_, N> {
+impl<const N: usize> Buffer<N> {
     /// Read from the buffer
     ///
     /// After checking if there is data on the buffer, it will read until there is no data left or
@@ -395,7 +398,7 @@ impl<const N: usize> Buffer<'_, N> {
     /// After a successfull read, we have to update the index and the last known state from the
     /// `last_tag` to ensure consistency.
     #[inline]
-    fn read(&self, buf: &mut [u8]) -> std::io::Result<usize> {
+    fn _read(&self, _buf: &mut [u8]) -> std::io::Result<usize> {
         unimplemented!()
     }
 
@@ -411,32 +414,42 @@ impl<const N: usize> Buffer<'_, N> {
     /// buffer was full, the state differs from the Consumer state - therefore the buffer must be
     /// full.
     #[inline]
-    fn write(&self, buf: &[u8]) -> std::io::Result<usize> {
+    fn _write(&self, _buf: &[u8]) -> std::io::Result<usize> {
         unimplemented!()
     }
 }
 
 /// This functions will only be used from the `Buffer` internally
-impl<'a, const N: usize> Buffer<'a, N> {
+impl<const N: usize> Buffer<N> {
+    fn get_empty_buffer(buffer: &Buffer<N>) -> BufferHelper<N> {
+        let buffer0 = unsafe { (*buffer.buffer.get()).as_mut_ptr() };
+        let buffer1 = unsafe { (*buffer.buffer.get()).as_mut_ptr() };
+
+        BufferHelper::new(buffer0, buffer1, N, 0)
+    }
     /// Consume `Buffer` to create a `Producer` and a `Consumer`
     ///
     /// This is the only place where we are using atomics over the `Arc` implementation. This will
     /// not give us any performance penalties as this is only be used to ensure that the `Buffer`
     /// object does exist.
-    fn split(self) -> (Producer<'a, N>, Consumer<'a, N>) {
+    fn split(self) -> (Producer<N>, Consumer<N>) {
         let buffer = Arc::new(self);
+
         let consumer = Consumer {
             buffer: buffer.clone(),
-            cache: BufferHelper(&mut [], &mut []),
+            cache: BufferHelper::new(std::ptr::null_mut(), std::ptr::null_mut(), 0, 0),
             index: 0,
             state: 0,
+            last_tag: 0,
         };
-        let (index, state, cache) = buffer.get_writeable_buffer().unwrap();
+
+        let cache = Self::get_empty_buffer(&buffer);
         let producer = Producer {
             buffer,
             cache,
-            index,
-            state,
+            index: 0,
+            state: 0,
+            zero_tag: 0,
         };
 
         (producer, consumer)
@@ -448,9 +461,19 @@ impl<'a, const N: usize> Buffer<'a, N> {
     /// is hold, we read from the `zero_tag` first. In the worst case, this will give us a smaller
     /// available space as it might change while reading the `last_tag`. However, on the next call
     /// we do have the updated value and we can continue.
-    fn get_writeable_buffer(&self) -> Option<(usize, usize, BufferHelper)> {
+    #[inline]
+    fn get_writeable_buffer(
+        &self,
+        zero_tag_old: usize,
+    ) -> Result<(usize, usize, BufferHelper<N>), usize> {
         // the read should be safe because its a single instruction to read a usize value
         let zero_tag = unsafe { *self.zero_tag.get() };
+
+        // fast path - if nothing changed, return
+        if zero_tag_old == zero_tag {
+            return Err(zero_tag);
+        }
+
         // this is safe as the Producer is the only one who change this value
         let last_tag = unsafe { *self.last_tag.get() };
 
@@ -462,29 +485,28 @@ impl<'a, const N: usize> Buffer<'a, N> {
 
         // check if buffer is full
         if last_index == zero_index && last_state != zero_state {
-            return None;
+            return Err(zero_tag);
         }
 
         // check if free data is wrapping
         let buffer = if zero_index > last_index {
             // |***E--------S***|
-            let buffer0 =
-                &mut unsafe { &mut *self.buffer.get() }[last_index..zero_index] as *mut [u8];
-            let buffer1 = &mut [] as *mut [u8];
+            let buffer0 = unsafe { (*self.buffer.get()).as_mut_ptr().add(last_index) };
+            let buffer1 = std::ptr::null_mut();
 
-            BufferHelper(buffer0, buffer1)
+            BufferHelper::new(buffer0, buffer1, zero_index - last_index, 0)
         } else {
             // |--S*****E-------|
-            let buffer0 = &mut unsafe { &mut *self.buffer.get() }[last_index..] as *mut [u8];
-            let buffer1 = &mut unsafe { &mut *self.buffer.get() }[..zero_index] as *mut [u8];
+            let buffer0 = unsafe { (*self.buffer.get()).as_mut_ptr().add(last_index) };
+            let buffer1 = unsafe { (*self.buffer.get()).as_mut_ptr() };
 
-            BufferHelper(buffer0, buffer1)
+            BufferHelper::new(buffer0, buffer1, N - last_index, zero_index)
         };
 
         if buffer.len() > 0 {
-            Some((last_index, last_state, buffer))
+            Ok((last_index, last_state, buffer))
         } else {
-            None
+            Err(zero_tag)
         }
     }
 
@@ -494,15 +516,25 @@ impl<'a, const N: usize> Buffer<'a, N> {
     /// `last_tag` first. In the worst case, this will give us a smaller consumable buffer as it
     /// might change while reading the `zero_tag`. However, on the next call we do have the updated
     /// value and we can continue.
-    fn get_readable_buffer(&self) -> Option<(usize, usize, BufferHelper)> {
+    #[inline]
+    fn get_readable_buffer(
+        &self,
+        old_last_tag: usize,
+    ) -> Result<(usize, usize, BufferHelper<N>), usize> {
         // the read should be safe because its a single instruction to read a usize value
         let last_tag = unsafe { *self.last_tag.get() };
+
+        // fast path - if nothing changed - we return
+        if old_last_tag == last_tag {
+            return Err(last_tag);
+        }
+
         // this is safe as the Consumer is the only one who change this value
         let zero_tag = unsafe { *self.zero_tag.get() };
 
         // check if buffer is empty
         if last_tag == zero_tag {
-            return None;
+            return Err(last_tag);
         }
 
         let zero_index = zero_tag >> 32;
@@ -514,32 +546,36 @@ impl<'a, const N: usize> Buffer<'a, N> {
         // check if buffer is full
         if zero_index == last_index && zero_state != last_state {
             // |*******S********|
-            let buffer0 = &mut unsafe { &mut *self.buffer.get() }[zero_index..] as *mut [u8];
-            let buffer1 = &mut unsafe { &mut *self.buffer.get() }[..zero_index] as *mut [u8];
 
-            return Some((zero_index, last_state, BufferHelper(buffer0, buffer1)));
+            let buffer0 = unsafe { (*self.buffer.get()).as_mut_ptr().add(zero_index) };
+            let buffer1 = unsafe { (*self.buffer.get()).as_mut_ptr() };
+
+            return Ok((
+                zero_index,
+                last_state,
+                BufferHelper::new(buffer0, buffer1, N - zero_index, zero_index),
+            ));
         }
 
         // check if data assigned is wrapping
         let buffer = if zero_index > last_index {
             // |***E--------S***|
-            let buffer0 = &mut unsafe { &mut *self.buffer.get() }[zero_index..] as *mut [u8];
-            let buffer1 = &mut unsafe { &mut *self.buffer.get() }[..last_index] as *mut [u8];
+            let buffer0 = unsafe { (*self.buffer.get()).as_mut_ptr().add(zero_index) };
+            let buffer1 = unsafe { (*self.buffer.get()).as_mut_ptr() };
 
-            BufferHelper(buffer0, buffer1)
+            BufferHelper::new(buffer0, buffer1, N - zero_index, last_index)
         } else {
             // |--S*****E-------|
-            let buffer0 =
-                &mut unsafe { &mut *self.buffer.get() }[zero_index..last_index] as *mut [u8];
-            let buffer1 = &mut [] as *mut [u8];
+            let buffer0 = unsafe { (*self.buffer.get()).as_mut_ptr().add(zero_index) };
+            let buffer1 = std::ptr::null_mut();
 
-            BufferHelper(buffer0, buffer1)
+            BufferHelper::new(buffer0, buffer1, last_index - zero_index, 0)
         };
 
         if buffer.len() > 0 {
-            Some((zero_index, last_state, buffer))
+            Ok((zero_index, last_state, buffer))
         } else {
-            None
+            Err(last_tag)
         }
     }
 }

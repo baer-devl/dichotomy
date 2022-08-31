@@ -1,72 +1,107 @@
-use std::io::{Read, Write};
-
 /// Wrapper around internal buffer which handles wrapping read/writes
-pub(crate) struct BufferHelper(pub(crate) *mut [u8], pub(crate) *mut [u8]);
+pub(crate) struct BufferHelper<const N: usize> {
+    pub buffer0: *mut u8,
+    pub buffer1: *mut u8,
+    len0: usize,
+    len1: usize,
+}
 
-impl<'a> BufferHelper {
+impl<const N: usize> BufferHelper<N> {
+    pub(crate) fn new(buffer0: *mut u8, buffer1: *mut u8, len0: usize, len1: usize) -> Self {
+        Self {
+            buffer0,
+            buffer1,
+            len0,
+            len1,
+        }
+    }
+
     /// Size of the accessable buffer
+    #[inline]
     pub(crate) fn len(&self) -> usize {
-        unsafe { &*self.0 }.len() + unsafe { &*self.1 }.len()
+        self.len0 + self.len1
     }
-}
 
-impl<'a> Read for BufferHelper {
     #[inline]
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    pub(crate) fn read(&mut self, buf: &mut [u8]) -> usize {
         // read from first buffer
-        let bytes = unsafe { &*self.0 }.read(buf)?;
+        let buf_len = buf.len();
+        let bytes = std::cmp::min(buf_len, self.len0);
 
-        // remove data from buffer
-        unsafe { self.0 = &mut (&mut *self.0)[bytes..] as *mut [u8] };
+        if bytes > 0 {
+            // actual copy
+            let src_ptr = self.buffer0;
+            let dst_ptr = buf.as_mut_ptr();
+            unsafe { dst_ptr.copy_from_nonoverlapping(src_ptr, bytes) };
 
-        // check fast-path
-        if bytes < unsafe { &*self.0 }.len() {
-            // nothing more to read
-            Ok(bytes)
-        } else {
-            // read more on second buffer
-            match unsafe { &*self.1 }.read(&mut buf[bytes..]) {
-                Ok(additional_bytes) => {
-                    // remove data from buffer
-                    unsafe { self.1 = &mut (&mut *self.1)[additional_bytes..] as *mut [u8] };
+            // remove data from buffer
+            self.len0 -= bytes;
+            self.buffer0 = unsafe { self.buffer0.add(bytes) };
 
-                    Ok(additional_bytes + bytes)
-                }
-                Err(err) => Err(err),
+            // check fast-path
+            if buf_len == bytes {
+                // nothing more to read
+                return bytes;
             }
         }
-    }
-}
 
-impl<'a> Write for BufferHelper {
+        // read more on second buffer
+        let bytes1 = std::cmp::min(buf_len - bytes, self.len1);
+
+        if bytes1 > 0 {
+            // actual copy
+            let src_ptr = self.buffer1;
+            let dst_ptr = unsafe { buf.as_mut_ptr().add(bytes) };
+            unsafe { dst_ptr.copy_from_nonoverlapping(src_ptr, bytes1) };
+
+            // remove data from buffer
+            self.len1 -= bytes1;
+            self.buffer1 = unsafe { self.buffer1.add(bytes1) };
+
+            bytes + bytes1
+        } else {
+            bytes
+        }
+    }
+
     #[inline]
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    pub(crate) fn write(&mut self, buf: &[u8]) -> usize {
         // write to the first buffer
-        let bytes = unsafe { &mut *self.0 }.write(buf)?;
+        let buf_len = buf.len();
+        let bytes = std::cmp::min(buf_len, self.len0);
 
-        // remove data from buffer
-        unsafe { self.0 = &mut (&mut *self.0)[bytes..] as *mut [u8] };
+        if bytes > 0 {
+            // actual copy
+            let src_ptr = buf.as_ptr();
+            let dst_ptr = self.buffer0;
+            unsafe { dst_ptr.copy_from_nonoverlapping(src_ptr, bytes) };
 
-        // return if we wrote all of the buffer
-        if bytes == buf.len() {
-            Ok(bytes)
-        } else {
-            // write to the second buffer
-            match unsafe { &mut *self.1 }.write(&buf[bytes..]) {
-                Ok(additional_bytes) => {
-                    // remove data from buffer
-                    unsafe { self.1 = &mut (&mut *self.1)[additional_bytes..] as *mut [u8] };
+            // remove data from buffer
+            self.len0 -= bytes;
+            self.buffer0 = unsafe { self.buffer0.add(bytes) };
 
-                    Ok(bytes + additional_bytes)
-                }
-
-                Err(err) => Err(err),
+            // return if we wrote all of the buffer
+            if bytes == buf_len {
+                return bytes;
             }
         }
-    }
 
-    #[inline]
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
+        // write to the second buffer
+        let bytes1 = std::cmp::min(buf_len - bytes, self.len1);
+
+        if bytes1 > 0 {
+            // actual copy
+            let src_ptr = unsafe { buf.as_ptr().add(bytes) };
+            let dst_ptr = self.buffer1;
+            unsafe { dst_ptr.copy_from_nonoverlapping(src_ptr, bytes1) };
+
+            // remove data from buffer
+            self.len1 -= bytes1;
+            self.buffer1 = unsafe { self.buffer1.add(bytes1) };
+
+            bytes + bytes1
+        } else {
+            bytes
+        }
     }
 }

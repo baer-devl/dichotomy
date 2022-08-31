@@ -6,12 +6,23 @@ edition = "2021"
 
 
 [profile.release]
-strip = true
+#debug = true
+#strip = true
+
+[profile.bench]
+#debug = true
 
 [dev-dependencies]
 criterion = "0.3.6"
 rand = "0.8.5"
 
+
 [[bench]]
 name = "performance"
 harness = false
+
+[[example]]
+name = "intended"
+
+[[example]]
+name = "intended2"
