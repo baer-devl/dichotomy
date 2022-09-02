@@ -1,3 +1,43 @@
+pub(crate) struct Slice {
+    index: usize,
+    length: usize,
+}
+
+impl Slice {
+    pub fn split_at(self, index: usize) -> (Slice, Slice) {
+        (
+            Slice {
+                index: self.index,
+                length: index,
+            },
+            Slice {
+                index: self.index + index,
+                length: self.length - index,
+            },
+        )
+    }
+}
+
+pub(crate) struct Collection {
+    ptr: *mut u8,
+    slice0: Slice,
+    slice1: Slice,
+}
+
+impl Collection {
+    pub fn swap(&self) {
+        unimplemented!()
+    }
+
+    pub fn take(&self) -> Slice {
+        unimplemented!()
+    }
+
+    pub fn put(&self) {
+        unimplemented!()
+    }
+}
+
 /// Wrapper around internal buffer which handles wrapping read/writes
 pub(crate) struct BufferHelper<'a, const N: usize> {
     pub buffer0: &'a mut [u8],

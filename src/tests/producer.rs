@@ -6,7 +6,7 @@ fn len_empty_buffer() {
     const SIZE: usize = 32;
 
     let (producer, _consumer) = Buffer::<SIZE>::new();
-    assert_eq!(0, producer.len());
+    assert_eq!(SIZE, producer.len());
 }
 
 #[test]
@@ -18,7 +18,7 @@ fn len_full_buffer() {
     super::get_random_values(&mut buf);
     producer.write(&buf).unwrap();
 
-    assert_eq!(SIZE, producer.len());
+    assert_eq!(0, producer.len());
 }
 
 #[test]
@@ -31,7 +31,7 @@ fn len_partial_full_buffer() {
     super::get_random_values(&mut buf);
     producer.write(&buf).unwrap();
 
-    assert_eq!(DATA, producer.len());
+    assert_eq!(SIZE - DATA, producer.len());
 }
 
 #[test]
@@ -49,7 +49,7 @@ fn len_partial_full_wrapping_buffer() {
     super::get_random_values(&mut buf);
     producer.write(&buf).unwrap();
 
-    assert_eq!(DATA, producer.len());
+    assert_eq!(SIZE - DATA, producer.len());
 }
 
 #[test]
@@ -69,7 +69,7 @@ fn len_full_wrapping_buffer() {
     super::get_random_values(&mut buf[..SIZE - DATA]);
     producer.write(&buf[..SIZE - DATA]).unwrap();
 
-    assert_eq!(SIZE, producer.len());
+    assert_eq!(0, producer.len());
 }
 
 #[test]

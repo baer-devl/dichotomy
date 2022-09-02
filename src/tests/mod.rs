@@ -25,16 +25,18 @@ fn write_read_random_value_empty_buffer() {
     get_random_values(&mut data);
 
     while written < DATA {
-        let bytes = producer.write(&data[written..]).unwrap();
-        written += bytes;
+        if let Ok(bytes) = producer.write(&data[written..]) {
+            written += bytes;
+        }
     }
 
     // read alues
     let mut buf = [0u8; DATA];
     let mut read = 0;
     while read < DATA {
-        let bytes = consumer.read(&mut buf[read..]).unwrap();
-        read += bytes;
+        if let Ok(bytes) = consumer.read(&mut buf[read..]) {
+            read += bytes;
+        }
     }
 
     assert!(&buf[..read] == data);
@@ -53,16 +55,18 @@ fn write_read_random_value_wrapping_buffer() {
     get_random_values(&mut data);
 
     while written < DATA {
-        let bytes = producer.write(&data[written..]).unwrap();
-        written += bytes;
+        if let Ok(bytes) = producer.write(&data[written..]) {
+            written += bytes;
+        }
     }
 
     // read value
     let mut buf = [0u8; DATA];
     let mut read = 0;
     while read < DATA {
-        let bytes = consumer.read(&mut buf[read..]).unwrap();
-        read += bytes;
+        if let Ok(bytes) = consumer.read(&mut buf[read..]) {
+            read += bytes;
+        }
     }
     assert!(&buf[..read] == data);
 
@@ -71,8 +75,9 @@ fn write_read_random_value_wrapping_buffer() {
 
     let mut written = 0;
     while written < DATA {
-        let bytes = producer.write(&data[written..]).unwrap();
-        written += bytes;
+        if let Ok(bytes) = producer.write(&data[written..]) {
+            written += bytes;
+        }
     }
 
     // read value
@@ -101,8 +106,9 @@ fn write_read_random_values_byte_size_buffer() {
         for _ in 0..ITERATIONS {
             let mut read = 0;
             while read < DATA {
-                let bytes = consumer.read(&mut buf[read..]).unwrap();
-                read += bytes;
+                if let Ok(bytes) = consumer.read(&mut buf[read..]) {
+                    read += bytes;
+                }
             }
             // wait till producer put the value on the queue
             while values_cpy.lock().unwrap().is_empty() {}
@@ -118,8 +124,9 @@ fn write_read_random_values_byte_size_buffer() {
         get_random_values(&mut data);
 
         while written < DATA {
-            let bytes = producer.write(&data[written..]).unwrap();
-            written += bytes;
+            if let Ok(bytes) = producer.write(&data[written..]) {
+                written += bytes;
+            }
         }
         values.lock().unwrap().push_back(data);
     }
@@ -143,8 +150,9 @@ fn write_read_random_values_wrapping_multiple_times() {
         for _ in 0..ITERATIONS {
             let mut read = 0;
             while read < DATA {
-                let bytes = consumer.read(&mut buf[read..]).unwrap();
-                read += bytes;
+                if let Ok(bytes) = consumer.read(&mut buf[read..]) {
+                    read += bytes;
+                }
             }
             // wait till producer put the value on the queue
             while values_cpy.lock().unwrap().is_empty() {}
@@ -160,8 +168,9 @@ fn write_read_random_values_wrapping_multiple_times() {
         get_random_values(&mut data);
 
         while written < DATA {
-            let bytes = producer.write(&data[written..]).unwrap();
-            written += bytes;
+            if let Ok(bytes) = producer.write(&data[written..]) {
+                written += bytes;
+            }
         }
         values.lock().unwrap().push_back(data);
     }
@@ -185,8 +194,9 @@ fn write_read_random_values_multiple_10_1_1m() {
         for _ in 0..ITERATIONS {
             let mut read = 0;
             while read < DATA {
-                let bytes = consumer.read(&mut buf[read..]).unwrap();
-                read += bytes;
+                if let Ok(bytes) = consumer.read(&mut buf[read..]) {
+                    read += bytes;
+                }
             }
             // wait till producer put the value on the queue
             while values_cpy.lock().unwrap().is_empty() {}
@@ -202,8 +212,9 @@ fn write_read_random_values_multiple_10_1_1m() {
         get_random_values(&mut data);
 
         while written < DATA {
-            let bytes = producer.write(&data[written..]).unwrap();
-            written += bytes;
+            if let Ok(bytes) = producer.write(&data[written..]) {
+                written += bytes;
+            }
         }
         values.lock().unwrap().push_back(data);
     }
@@ -227,8 +238,9 @@ fn write_read_random_values_multiple_120_512_1m() {
         for _ in 0..ITERATIONS {
             let mut read = 0;
             while read < DATA {
-                let bytes = consumer.read(&mut buf[read..]).unwrap();
-                read += bytes;
+                if let Ok(bytes) = consumer.read(&mut buf[read..]) {
+                    read += bytes;
+                }
             }
             // wait till producer put the value on the queue
             while values_cpy.lock().unwrap().is_empty() {}
@@ -244,8 +256,9 @@ fn write_read_random_values_multiple_120_512_1m() {
         get_random_values(&mut data);
 
         while written < DATA {
-            let bytes = producer.write(&data[written..]).unwrap();
-            written += bytes;
+            if let Ok(bytes) = producer.write(&data[written..]) {
+                written += bytes;
+            }
         }
         values.lock().unwrap().push_back(data);
     }
@@ -269,8 +282,9 @@ fn write_read_random_values_multiple_1001_1024_1m() {
         for _ in 0..ITERATIONS {
             let mut read = 0;
             while read < DATA {
-                let bytes = consumer.read(&mut buf[read..]).unwrap();
-                read += bytes;
+                if let Ok(bytes) = consumer.read(&mut buf[read..]) {
+                    read += bytes;
+                }
             }
             // wait till producer put the value on the queue
             while values_cpy.lock().unwrap().is_empty() {}
@@ -286,8 +300,9 @@ fn write_read_random_values_multiple_1001_1024_1m() {
         get_random_values(&mut data);
 
         while written < DATA {
-            let bytes = producer.write(&data[written..]).unwrap();
-            written += bytes;
+            if let Ok(bytes) = producer.write(&data[written..]) {
+                written += bytes;
+            }
         }
         values.lock().unwrap().push_back(data);
     }
@@ -312,7 +327,7 @@ fn silly() {
                     read += bytes;
                 }
             }
-            //assert!(DATA == buf)
+            assert!(DATA == buf)
         }
     });
 
