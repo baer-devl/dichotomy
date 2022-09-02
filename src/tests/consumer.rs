@@ -48,8 +48,10 @@ fn len_partial_full_wrapping_buffer() {
 
     super::get_random_values(&mut buf);
     producer.write(&buf).unwrap();
+    super::get_random_values(&mut buf);
+    producer.write(&buf).unwrap();
 
-    assert_eq!(DATA, consumer.len());
+    assert_eq!(SIZE, consumer.len());
 }
 
 #[test]
@@ -66,8 +68,8 @@ fn len_full_wrapping_buffer() {
 
     super::get_random_values(&mut buf);
     producer.write(&buf).unwrap();
-    super::get_random_values(&mut buf[..SIZE - DATA]);
-    producer.write(&buf[..SIZE - DATA]).unwrap();
+    super::get_random_values(&mut buf);
+    producer.write(&buf).unwrap();
 
     assert_eq!(SIZE, consumer.len());
 }
@@ -144,18 +146,18 @@ fn is_empty_full_wrapping_buffer() {
 }
 
 #[test]
-fn is_producer_available_existing() {
+fn is_abandoned_existing() {
     const SIZE: usize = 32;
     let (_producer, consumer) = Buffer::<SIZE>::new();
 
-    assert!(consumer.is_producer_available());
+    assert!(!consumer.is_abandoned());
 }
 
 #[test]
-fn is_producer_available_dropped() {
+fn is_abandoned_dropped() {
     const SIZE: usize = 32;
     let (producer, consumer) = Buffer::<SIZE>::new();
     drop(producer);
 
-    assert!(!consumer.is_producer_available());
+    assert!(consumer.is_abandoned());
 }

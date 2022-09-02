@@ -38,9 +38,9 @@
 //! the same, the buffer is empty.
 //!
 //! ## Filled buffer
-//! |----Z**********L-----|
+//! |----H**********T-----|
 //!
-//! 'Z' representing the index of `zero_tag` and 'L' representing the index of `last_tag`. As both
+//! 'H' representing the index of `head_tag` and 'T' representing the index of `tail_tag`. As both
 //! indicies are different, it is safe to assume that there is data to read from and free space to
 //! write to. Both, the free space and the filled spaces can easily calculated.
 //!
@@ -71,15 +71,23 @@ use std::{
     sync::Arc,
 };
 
-/// Ring buffer abstraction helper
-//mod helper;
-
 #[cfg(test)]
 mod tests;
 
+/// Splits a tag into its two parts, index and state
 #[inline]
 fn split_tag(tag: usize) -> (usize, usize) {
     (tag >> 32, tag & 0x00ff_ffff)
+}
+
+/// Return the smallest value
+#[inline]
+fn min(a: usize, b: usize) -> usize {
+    if a > b {
+        b
+    } else {
+        a
+    }
 }
 
 /// Writable part of the buffer
@@ -90,12 +98,12 @@ fn split_tag(tag: usize) -> (usize, usize) {
 /// not be possible to write more data to the buffer.
 pub struct Producer<const N: usize> {
     buffer: Arc<Buffer<N>>,
-    last_index: usize,
-    last_state: usize,
+    tail_index: usize,
+    tail_state: usize,
     length0: usize,
     length1: usize,
     length: usize,
-    known_zero_tag: usize,
+    last_head_tag: usize,
 }
 
 /// This is safe because we are using `Arc` to share the underlaying buffer
@@ -104,7 +112,7 @@ unsafe impl<const N: usize> Send for Producer<N> {}
 unsafe impl<const N: usize> Sync for Producer<N> {}
 
 impl<const N: usize> Producer<N> {
-    /// Return the current length of the buffer ready to write to
+    /// Return the current length of the buffer that is writeable
     pub fn len(&self) -> usize {
         N - self.buffer.len()
     }
@@ -114,72 +122,72 @@ impl<const N: usize> Producer<N> {
         self.buffer.len() == N
     }
 
-    /// Return if `Consumer` part still exists
-    pub fn is_consumer_available(&self) -> bool {
-        Arc::strong_count(&self.buffer) > 1
+    /// Return if `Consumer` part was dropped
+    pub fn is_abandoned(&self) -> bool {
+        Arc::strong_count(&self.buffer) == 1
     }
 
+    /// Update the state of the buffer after data was written
     #[inline]
     fn update_buffer(&mut self, bytes: usize) {
-        self.last_state += 1;
-        self.last_index = (self.last_index + bytes) % N;
+        self.tail_state += 1;
+        self.tail_index = (self.tail_index + bytes) % N;
 
-        let last_tag = self.last_index << 32 | self.last_state;
+        let tail_tag = self.tail_index << 32 | self.tail_state;
 
         // set new value
-        unsafe { *self.buffer.last_tag.get() = last_tag };
+        unsafe { *self.buffer.tail_tag.get() = tail_tag };
     }
 
+    /// Update the current cache
+    ///
+    /// This is expensive and should only be done as rarely as possible.
     #[inline]
     fn update_cache(&mut self) -> bool {
         // fast-path -> check if something changed since last check
-        let zero_tag = self.buffer.get_zero_tag();
-        if self.known_zero_tag == zero_tag {
+        let head_tag = self.buffer.get_head_tag();
+        if self.last_head_tag == head_tag {
             return false;
-            /*return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "No space left",
-            ));*/
         }
 
         // get actual data
-        let (zero_index, _zero_state) = split_tag(zero_tag);
-        let (last_index, last_state) = self.buffer.get_last_tag_splitted();
+        let (head_index, _head_state) = split_tag(head_tag);
+        let (tail_index, last_state) = self.buffer.get_tail_tag_splitted();
 
         // update lengths
-        if zero_index > last_index {
+        if head_index > tail_index {
             // |***L--------Z***|
-            self.length0 = zero_index - last_index;
+            self.length0 = head_index - tail_index;
             self.length1 = 0;
             self.length = self.length0;
         } else {
             // |--Z*****L-------|
-            self.length0 = N - last_index;
-            self.length1 = zero_index;
+            self.length0 = N - tail_index;
+            self.length1 = head_index;
             self.length = self.length0 + self.length1;
         };
 
         // update rest
-        self.last_index = last_index;
-        self.last_state = last_state;
-        self.known_zero_tag = zero_tag;
+        self.tail_index = tail_index;
+        self.tail_state = last_state;
+        self.last_head_tag = head_tag;
 
         true
     }
 
+    /// Return the mutable pointer to the internal buffer with the correct offset
+    #[inline]
+    fn get_mut_ptr(&mut self, offset: isize) -> *mut u8 {
+        unsafe { (*self.buffer.buffer.get()).as_mut_ptr().offset(offset) }
+    }
+
     #[inline]
     fn write_first_buffer(&mut self, buf: &[u8], buf_len: usize) -> usize {
-        let bytes0 = std::cmp::min(self.length0, buf_len);
+        let bytes0 = min(self.length0, buf_len);
         if bytes0 > 0 {
             // copy data
-            unsafe {
-                let ptr = (*self.buffer.buffer.get()).as_mut_ptr();
-                std::ptr::copy_nonoverlapping(
-                    buf.as_ptr(),
-                    ptr.offset(self.last_index as isize),
-                    bytes0,
-                );
-            }
+            let ptr = self.get_mut_ptr(self.tail_index as isize);
+            unsafe { std::ptr::copy_nonoverlapping(buf.as_ptr(), ptr, bytes0) };
 
             // update state
             self.length0 -= bytes0;
@@ -191,17 +199,13 @@ impl<const N: usize> Producer<N> {
 
     #[inline]
     fn write_second_buffer(&mut self, buf: &[u8], buf_len: usize, bytes0: usize) -> usize {
-        let bytes1 = std::cmp::min(self.length1, buf_len - bytes0);
+        let bytes1 = min(self.length1, buf_len - bytes0);
         if bytes1 > 0 {
             // copy data
+            let ptr = self.get_mut_ptr(((self.tail_index + bytes0) % N) as isize);
             unsafe {
-                let ptr = (*self.buffer.buffer.get()).as_mut_ptr();
-                std::ptr::copy_nonoverlapping(
-                    buf.as_ptr().offset(bytes0 as isize),
-                    ptr.offset(((self.last_index + bytes0) % N) as isize),
-                    bytes1,
-                );
-            }
+                std::ptr::copy_nonoverlapping(buf.as_ptr().offset(bytes0 as isize), ptr, bytes1)
+            };
 
             // update state
             self.length1 -= bytes1;
@@ -213,6 +217,7 @@ impl<const N: usize> Producer<N> {
 }
 
 /// Implement `Write` to make it easy to write to the buffer
+#[cfg(not(features = "generic"))]
 impl<const N: usize> Write for Producer<N> {
     #[inline]
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
@@ -221,7 +226,10 @@ impl<const N: usize> Write for Producer<N> {
         // check if we need to update our infos
         if self.length < buf_len {
             if !self.update_cache() && self.length == 0 {
-                return Ok(0);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::OutOfMemory,
+                    "No space left",
+                ));
             }
         }
 
@@ -256,12 +264,12 @@ impl<const N: usize> Write for Producer<N> {
 /// not be possible to read more data from the buffer.
 pub struct Consumer<const N: usize> {
     buffer: Arc<Buffer<N>>,
-    zero_index: usize,
-    zero_state: usize,
+    head_index: usize,
+    head_state: usize,
     length0: usize,
     length1: usize,
     length: usize,
-    known_last_tag: usize,
+    last_tail_tag: usize,
 }
 
 /// This is safe because we are using `Arc` to share the underlaying buffer
@@ -275,97 +283,94 @@ impl<const N: usize> Consumer<N> {
         self.buffer.len()
     }
 
-    /// Return if the buffer is currently full
+    /// Return if the buffer is currently empty
     pub fn is_empty(&self) -> bool {
         self.buffer.is_empty()
     }
 
-    /// Return if `Producer` part still exists
-    pub fn is_producer_available(&self) -> bool {
-        Arc::strong_count(&self.buffer) > 1
+    /// Return if `Producer` was dropped
+    pub fn is_abandoned(&self) -> bool {
+        Arc::strong_count(&self.buffer) == 1
+    }
+
+    /// Return the mutable pointer to the internal buffer with the correct offset
+    #[inline]
+    fn get_mut_ptr(&mut self, offset: isize) -> *mut u8 {
+        unsafe { (*self.buffer.buffer.get()).as_mut_ptr().offset(offset) }
     }
 
     #[inline]
     fn update_buffer(&mut self, bytes: usize) {
-        self.zero_state = self.known_last_tag & 0x00ff_ffff;
-        self.zero_index = (self.zero_index + bytes) % N;
+        self.head_state = self.last_tail_tag & 0x00ff_ffff;
+        self.head_index = (self.head_index + bytes) % N;
 
-        let zero_tag = self.zero_index << 32 | self.zero_state;
+        let head_tag = self.head_index << 32 | self.head_state;
 
         // set new value
-        unsafe { *self.buffer.zero_tag.get() = zero_tag };
+        unsafe { *self.buffer.head_tag.get() = head_tag };
     }
 
     #[inline]
     fn update_cache(&mut self) -> bool {
         // fast-path -> check if something changed since last check
-        let last_tag = self.buffer.get_last_tag();
-        if self.known_last_tag == last_tag {
+        let tail_tag = self.buffer.get_tail_tag();
+        if self.last_tail_tag == tail_tag {
             return false;
-            /*return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "No data to read",
-            ));*/
         }
 
         // get actual data
-        let (zero_index, zero_state) = self.buffer.get_zero_tag_splitted();
-        let (last_index, last_state) = split_tag(last_tag);
+        let (head_index, head_state) = self.buffer.get_head_tag_splitted();
+        let (tail_index, tail_state) = split_tag(tail_tag);
 
         // update lengths
-        if zero_index == last_index && zero_state != last_state {
+        if head_index == tail_index && head_state != tail_state {
             // |****Z***********|
-            self.length0 = N - zero_index;
-            self.length1 = zero_index;
+            self.length0 = N - head_index;
+            self.length1 = head_index;
             self.length = N;
-        } else if zero_index > last_index {
+        } else if head_index > tail_index {
             // |***L--------Z***|
-            self.length0 = N - zero_index;
-            self.length1 = last_index;
+            self.length0 = N - head_index;
+            self.length1 = tail_index;
             self.length = self.length0 + self.length1;
         } else {
             // |--Z*****L-------|
-            self.length0 = last_index - zero_index;
+            self.length0 = tail_index - head_index;
             self.length1 = 0;
             self.length = self.length0;
         };
 
         // update rest
-        self.zero_index = zero_index;
-        self.zero_state = zero_state;
-        self.known_last_tag = last_tag;
+        self.head_index = head_index;
+        self.head_state = head_state;
+        self.last_tail_tag = tail_tag;
 
         true
     }
 }
 
 /// Implement `Read` to make it easy to read from the buffer
+#[cfg(not(features = "generic"))]
 impl<const N: usize> Read for Consumer<N> {
     #[inline]
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let buf_len = buf.len();
-
         // check if we need to update our infos
-        // TODO: maybe use length0 here and update all if first one is empty (depending on how much
-        // the update process costs
         if self.length < buf_len {
             if !self.update_cache() && self.length == 0 {
-                return Ok(0);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::OutOfMemory,
+                    "No data to read",
+                ));
             }
         }
 
         //  -> check first slice
-        let bytes0 = std::cmp::min(self.length0, buf_len);
+        let bytes0 = min(self.length0, buf_len);
         if bytes0 > 0 {
             // copy data
-            unsafe {
-                let ptr = (*self.buffer.buffer.get()).as_ptr();
-                std::ptr::copy_nonoverlapping(
-                    ptr.offset(self.zero_index as isize),
-                    buf.as_mut_ptr(),
-                    bytes0,
-                )
-            };
+            let ptr = self.get_mut_ptr(self.head_index as isize);
+            unsafe { std::ptr::copy_nonoverlapping(ptr, buf.as_mut_ptr(), bytes0) };
 
             // update state
             self.length0 -= bytes0;
@@ -378,16 +383,12 @@ impl<const N: usize> Read for Consumer<N> {
             }
         }
         //  -> check second slice
-        let bytes1 = std::cmp::min(self.length1, buf_len - bytes0);
+        let bytes1 = min(self.length1, buf_len - bytes0);
         if bytes1 > 0 {
             // copy data
+            let ptr = self.get_mut_ptr(((self.head_index + bytes0) % N) as isize);
             unsafe {
-                let ptr = (*self.buffer.buffer.get()).as_ptr();
-                std::ptr::copy_nonoverlapping(
-                    ptr.offset(((self.zero_index + bytes0) % N) as isize),
-                    buf.as_mut_ptr().offset(bytes0 as isize),
-                    bytes1,
-                )
+                std::ptr::copy_nonoverlapping(ptr, buf.as_mut_ptr().offset(bytes0 as isize), bytes1)
             };
 
             // update state
@@ -401,22 +402,47 @@ impl<const N: usize> Read for Consumer<N> {
 }
 
 /// Lock-free binary buffer without locks or atomic operations for synchronization
+#[cfg(not(features = "generic"))]
 pub struct Buffer<const N: usize> {
     /// Internal buffer accessed by `Producer` and `Consumer`
     ///
     /// Both parts will _always_ have mutual exclusive access their corresponding parts which makes
     /// it safe to access this buffer at the same time.
+    #[cfg(not(feature = "dynamic"))]
     buffer: UnsafeCell<[u8; N]>,
+    #[cfg(feature = "dynamic")]
+    buffer: UnsafeCell<Vec<u8>>,
 
-    /// Marks the beginning of the readable data and the last known state of the `last_tag` state
+    /// Marks the beginning of the readable data and the last known state of the `tail_tag` state
     ///
     /// This field can only be changed by the `Consumer`. The `Producer` is only allowed to read.
-    zero_tag: UnsafeCell<usize>,
+    head_tag: UnsafeCell<usize>,
 
     /// Marks the beginning of the writeable data and the last state
     ///
     /// This field can only be changed by the `Producer`. The `Consumer` is only allowed to read.
-    last_tag: UnsafeCell<usize>,
+    tail_tag: UnsafeCell<usize>,
+}
+#[cfg(features = "generic")]
+pub struct Buffer<const N: usize, T: Send + Sync> {
+    /// Internal buffer accessed by `Producer` and `Consumer`
+    ///
+    /// Both parts will _always_ have mutual exclusive access their corresponding parts which makes
+    /// it safe to access this buffer at the same time.
+    #[cfg(not(feature = "dynamic"))]
+    buffer: UnsafeCell<[T; N]>,
+    #[cfg(feature = "dynamic")]
+    buffer: UnsafeCell<Vec<T>>,
+
+    /// Marks the beginning of the readable data and the last known state of the `tail_tag` state
+    ///
+    /// This field can only be changed by the `Consumer`. The `Producer` is only allowed to read.
+    head_tag: UnsafeCell<usize>,
+
+    /// Marks the beginning of the writeable data and the last state
+    ///
+    /// This field can only be changed by the `Producer`. The `Consumer` is only allowed to read.
+    tail_tag: UnsafeCell<usize>,
 }
 
 #[cfg(target_pointer_width = "64")]
@@ -467,6 +493,7 @@ impl<const N: usize> Buffer<N> {
     ///     }
     /// }
     /// ```
+    #[cfg(not(feature = "dynamic"))]
     pub fn new() -> (Producer<N>, Consumer<N>) {
         // ensure that the size does not exceed the maximum allowed size for a 64 bit system
         #[cfg(target_pointer_width = "64")]
@@ -480,8 +507,29 @@ impl<const N: usize> Buffer<N> {
 
         let buffer = Self {
             buffer: UnsafeCell::new([0u8; N]),
-            zero_tag: UnsafeCell::default(),
-            last_tag: UnsafeCell::default(),
+            head_tag: UnsafeCell::default(),
+            tail_tag: UnsafeCell::default(),
+        };
+
+        buffer.split()
+    }
+
+    #[cfg(feature = "dynamic")]
+    pub fn new(capacity: usize) -> (Producer<N>, Consumer<N>) {
+        // ensure that the size does not exceed the maximum allowed size for a 64 bit system
+        #[cfg(target_pointer_width = "64")]
+        assert!(u32::try_from(N).is_ok());
+        // ensure that the size does not exceed the maximum allowed size for a 32 bit system
+        #[cfg(target_pointer_width = "32")]
+        assert!(u16::try_from(N).is_ok());
+        // ensure that the size does not exceed the maximum allowed size for a 16 bit system
+        #[cfg(target_pointer_width = "16")]
+        assert!(u8::try_from(N).is_ok());
+
+        let buffer = Self {
+            buffer: UnsafeCell::new(Vec::with_capacity(capacity)),
+            head_tag: UnsafeCell::default(),
+            tail_tag: UnsafeCell::default(),
         };
 
         buffer.split()
@@ -493,60 +541,62 @@ impl<const N: usize> Buffer<N> {
     /// Return the current length of the data on the buffer
     #[inline]
     fn len(&self) -> usize {
-        let zero_tag = unsafe { *self.zero_tag.get() };
-        let last_tag = unsafe { *self.last_tag.get() };
+        let head_tag = self.get_head_tag();
+        let tail_tag = self.get_tail_tag();
 
         // check if buffer is empty
-        if zero_tag == last_tag {
+        if head_tag == tail_tag {
             return 0;
         }
 
-        let zero_index = zero_tag >> 32;
-        let zero_state = zero_tag & 0x00ff_ffff;
-
-        let last_index = last_tag >> 32;
-        let last_state = last_tag & 0x00ff_ffff;
+        let (head_index, head_state) = split_tag(head_tag);
+        let (tail_index, tail_state) = split_tag(tail_tag);
 
         // check if buffer is full
-        if zero_index == last_index && zero_state != last_state {
+        if head_index == tail_index && head_state != tail_state {
             return N;
         }
 
         // check if data is wrapping
-        if zero_index <= last_index {
-            // |---S*****E-------|
-            last_index - zero_index
+        if head_index <= tail_index {
+            // |---H*****T-------|
+            println!("{}: {} - {}", N, head_index, tail_index);
+            tail_index - head_index
         } else {
-            // |*E----------S****|
-            N - zero_index + last_index
+            // |*T----------H****|
+            println!("{}: {} - {}", N, head_index, tail_index);
+            N - head_index + tail_index
         }
     }
 
     /// Return if the buffer is currently empty
     #[inline]
     fn is_empty(&self) -> bool {
-        let zero_tag = unsafe { *self.zero_tag.get() };
-        let last_tag = unsafe { *self.last_tag.get() };
+        let head_tag = self.get_head_tag();
+        let tail_tag = self.get_tail_tag();
 
         // check if buffer is empty
-        zero_tag == last_tag
+        head_tag == tail_tag
     }
 
     #[inline]
-    fn get_zero_tag(&self) -> usize {
-        unsafe { *self.zero_tag.get() }
+    fn get_head_tag(&self) -> usize {
+        unsafe { *self.head_tag.get() }
     }
+
     #[inline]
-    fn get_last_tag(&self) -> usize {
-        unsafe { *self.last_tag.get() }
+    fn get_tail_tag(&self) -> usize {
+        unsafe { *self.tail_tag.get() }
     }
+
     #[inline]
-    fn get_zero_tag_splitted(&self) -> (usize, usize) {
-        split_tag(self.get_zero_tag())
+    fn get_head_tag_splitted(&self) -> (usize, usize) {
+        split_tag(self.get_head_tag())
     }
+
     #[inline]
-    fn get_last_tag_splitted(&self) -> (usize, usize) {
-        split_tag(self.get_last_tag())
+    fn get_tail_tag_splitted(&self) -> (usize, usize) {
+        split_tag(self.get_tail_tag())
     }
 }
 
@@ -562,22 +612,22 @@ impl<const N: usize> Buffer<N> {
 
         let consumer = Consumer {
             buffer: buffer.clone(),
-            zero_index: 0,
-            zero_state: 0,
+            head_index: 0,
+            head_state: 0,
             length0: 0,
             length1: 0,
             length: 0,
-            known_last_tag: 0,
+            last_tail_tag: 0,
         };
 
         let producer = Producer {
             buffer,
-            last_index: 0,
-            last_state: 0,
+            tail_index: 0,
+            tail_state: 0,
             length0: N,
             length1: 0,
             length: N,
-            known_zero_tag: 0,
+            last_head_tag: 0,
         };
 
         (producer, consumer)

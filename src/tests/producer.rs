@@ -132,30 +132,36 @@ fn is_full_full_wrapping_buffer() {
     let mut buf = [0u8; DATA];
     let mut buf_read = [0u8; DATA];
     super::get_random_values(&mut buf);
-    producer.write(&buf).unwrap();
-    consumer.read(&mut buf_read).unwrap();
+    println!("len: {}", producer.buffer.len());
+    let b = producer.write(&buf).unwrap();
+    println!("len: {} {}", b, producer.buffer.len());
+
+    let b = consumer.read(&mut buf_read).unwrap();
+    println!("len: {} {}", b, producer.buffer.len());
 
     super::get_random_values(&mut buf);
-    producer.write(&buf).unwrap();
+    let b = producer.write(&buf).unwrap();
+    println!("len: {} {}", b, producer.buffer.len());
     super::get_random_values(&mut buf[..SIZE - DATA]);
-    producer.write(&buf[..SIZE - DATA]).unwrap();
+    let b = producer.write(&buf[..SIZE - DATA]).unwrap();
+    println!("len: {} {}", b, producer.buffer.len());
 
     assert!(producer.is_full());
 }
 
 #[test]
-fn is_consumer_available_existing() {
+fn is_abandoned_existing() {
     const SIZE: usize = 32;
     let (producer, _consumer) = Buffer::<SIZE>::new();
 
-    assert!(producer.is_consumer_available());
+    assert!(!producer.is_abandoned());
 }
 
 #[test]
-fn is_consumer_available_dropped() {
+fn is_abandoned_dropped() {
     const SIZE: usize = 32;
     let (producer, consumer) = Buffer::<SIZE>::new();
     drop(consumer);
 
-    assert!(!producer.is_consumer_available());
+    assert!(producer.is_abandoned());
 }

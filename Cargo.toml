@@ -5,6 +5,12 @@ version = "0.1.0"
 edition = "2021"
 
 
+[features]
+default = []
+dynamic = []
+generic = []
+
+
 [profile.release]
 debug = true
 #strip = true
