@@ -1,9 +1,8 @@
 use dichotomy::Buffer;
-use std::io::{Read, Write};
 
 const BUF_SIZE: usize = 64;
 const DATA: &[u8] = b"hello world";
-const ITERATIONS: usize = 100_000_000;
+const ITERATIONS: usize = 1_000;
 
 fn main() {
     let (mut producer, mut consumer) = Buffer::<BUF_SIZE>::new();

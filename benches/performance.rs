@@ -1,6 +1,5 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use dichotomy::*;
-use std::io::{Read, Write};
 
 fn bench_1() {
     const BUF_SIZE: usize = 1;

@@ -1,9 +1,7 @@
 use crate::Buffer;
 use rand::{self, Rng};
 use std::collections::VecDeque;
-use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
-
 mod consumer;
 mod producer;
 
@@ -314,7 +312,7 @@ fn write_read_random_values_multiple_1001_1024_1m() {
 fn silly() {
     const BUF_SIZE: usize = 1024;
     const DATA: &[u8] = b"hello world";
-    const ITERATIONS: usize = 10_000_000;
+    const ITERATIONS: usize = 1_000;
 
     let (mut producer, mut consumer) = Buffer::<BUF_SIZE>::new();
     let t = std::thread::spawn(move || {

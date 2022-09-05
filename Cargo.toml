@@ -7,8 +7,6 @@ edition = "2021"
 
 [features]
 default = []
-dynamic = []
-generic = []
 
 
 [profile.release]

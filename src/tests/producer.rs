@@ -1,5 +1,4 @@
 use crate::Buffer;
-use std::io::{Read, Write};
 
 #[test]
 fn len_empty_buffer() {
@@ -132,19 +131,13 @@ fn is_full_full_wrapping_buffer() {
     let mut buf = [0u8; DATA];
     let mut buf_read = [0u8; DATA];
     super::get_random_values(&mut buf);
-    println!("len: {}", producer.buffer.len());
-    let b = producer.write(&buf).unwrap();
-    println!("len: {} {}", b, producer.buffer.len());
-
-    let b = consumer.read(&mut buf_read).unwrap();
-    println!("len: {} {}", b, producer.buffer.len());
+    producer.write(&buf).unwrap();
+    consumer.read(&mut buf_read).unwrap();
 
     super::get_random_values(&mut buf);
-    let b = producer.write(&buf).unwrap();
-    println!("len: {} {}", b, producer.buffer.len());
+    producer.write(&buf).unwrap();
     super::get_random_values(&mut buf[..SIZE - DATA]);
-    let b = producer.write(&buf[..SIZE - DATA]).unwrap();
-    println!("len: {} {}", b, producer.buffer.len());
+    producer.write(&buf[..SIZE - DATA]).unwrap();
 
     assert!(producer.is_full());
 }

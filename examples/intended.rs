@@ -1,5 +1,4 @@
 use dichotomy::Buffer;
-use std::io::{Read, Write};
 
 const BUF_SIZE: usize = 1024;
 const DATA: &[u8] = b"hello world";

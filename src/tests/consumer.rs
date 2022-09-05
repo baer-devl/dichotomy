@@ -1,5 +1,4 @@
 use crate::Buffer;
-use std::io::{Read, Write};
 
 #[test]
 fn len_empty_buffer() {
