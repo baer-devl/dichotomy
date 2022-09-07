@@ -1,12 +1,12 @@
 use dichotomy::Buffer;
 
-const BUF_SIZE: usize = 64;
+const BUF_SIZE: usize = 1024;
 const DATA: &[u8] = b"hello world";
-const ITERATIONS: usize = 1_000;
+const ITERATIONS: usize = 100_000_000;
 
 fn main() {
     let (mut producer, mut consumer) = Buffer::<BUF_SIZE>::new();
-    std::thread::spawn(move || {
+    let t = std::thread::spawn(move || {
         // consumer
         let mut buf = [0u8; DATA.len()];
         for _ in 0..ITERATIONS {
@@ -30,4 +30,5 @@ fn main() {
             }
         }
     }
+    t.join().unwrap();
 }

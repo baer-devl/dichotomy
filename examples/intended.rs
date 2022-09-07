@@ -18,7 +18,7 @@ fn main() {
                     }
                 }
 
-                //assert!(DATA == buf)
+                assert!(DATA == buf)
             }
         });
 

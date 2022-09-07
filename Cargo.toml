@@ -5,16 +5,15 @@ version = "0.1.0"
 edition = "2021"
 
 
-[features]
-default = []
-
+#[features]
+#default = []
 
 [profile.release]
 debug = true
 #strip = true
 
 [profile.bench]
-#debug = true
+debug = true
 
 [dev-dependencies]
 criterion = "0.3.6"

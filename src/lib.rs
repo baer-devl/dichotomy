@@ -1,4 +1,3 @@
-#![feature(hint_must_use)]
 //! Dichotomy is a lock-free byte ring buffer
 //!
 //! The buffer itself does not use any locks like `Mutex` or `RwLock`, nor make use of atomics to
@@ -209,13 +208,13 @@ impl<const N: usize> Producer<N> {
     #[inline]
     fn update_cache(&mut self) -> bool {
         // fast-path -> check if something changed since last check
-        let head_tag = unsafe { *self.buffer.head_tag.get() };
+        let head_tag = self.buffer.get_head_tag();
         if self.last_head_tag == head_tag {
             false
         } else {
             // get actual data
             let (head_index, _head_state) = split_tag(head_tag);
-            let (tail_index, last_state) = split_tag(unsafe { *self.buffer.tail_tag.get() });
+            let (tail_index, last_state) = split_tag(self.buffer.get_tail_tag());
 
             // update lengths
             if head_index > tail_index {
@@ -266,11 +265,16 @@ impl<const N: usize> Producer<N> {
     fn write_second_buffer(&mut self, buf: &[u8], buf_len: usize, bytes0: usize) -> usize {
         let bytes1 = min(self.length1, buf_len - bytes0);
         if bytes1 > 0 {
+            // calculate offset - try to avoid modulo operation
+            let offset = if bytes0 == 0 {
+                self.tail_index
+            } else {
+                (self.tail_index + bytes0) % N
+            };
+
             // copy data
-            let ptr = self.get_mut_ptr((self.tail_index + bytes0) % N);
-            unsafe {
-                core::ptr::copy_nonoverlapping(buf.as_ptr().add(bytes0), ptr, bytes1);
-            }
+            let ptr = self.get_mut_ptr(offset);
+            unsafe { core::ptr::copy_nonoverlapping(buf.as_ptr().add(bytes0), ptr, bytes1) };
 
             // update state
             self.length1 -= bytes1;
@@ -296,30 +300,25 @@ impl<const N: usize> Producer<N> {
 
         // check if we need to update our infos
         if self.length < buf_len && !self.update_cache() && self.length == 0 {
-            // FIXME: no spin-loop here!
-            core::hint::spin_loop();
-            return Err(Error::Full);
-            /*return Err(std::io::Error::new(
-                std::io::ErrorKind::OutOfMemory,
-                "Buffer is full",
-            ));*/
+            Err(Error::Full)
+        } else {
+            //  -> check first slice
+            let bytes0 = self.write_first_buffer(buf, buf_len);
+
+            // if there are still bytes left in length0 - we are done
+            if self.length0 > 0 {
+                self.update_buffer(bytes0);
+                return Ok(bytes0);
+            }
+
+            //  -> check second slice
+            let bytes1 = self.write_second_buffer(buf, buf_len, bytes0);
+
+            // update state
+            self.update_buffer(bytes0 + bytes1);
+
+            Ok(bytes0 + bytes1)
         }
-
-        //  -> check first slice
-        let bytes0 = self.write_first_buffer(buf, buf_len);
-        // if there are still bytes left in length0 - we are done
-        if self.length0 > 0 {
-            self.update_buffer(bytes0);
-            return Ok(bytes0);
-        }
-
-        //  -> check second slice
-        let bytes1 = self.write_second_buffer(buf, buf_len, bytes0);
-
-        // update state
-        self.update_buffer(bytes0 + bytes1);
-
-        Ok(bytes0 + bytes1)
     }
 }
 
@@ -394,7 +393,7 @@ impl<const N: usize> Consumer<N> {
 
     /// Return a mutable pointer to the internal buffer with the given offset
     #[inline]
-    fn get_mut_ptr(&mut self, offset: usize) -> *mut u8 {
+    fn get_ptr(&mut self, offset: usize) -> *const u8 {
         unsafe { self.buffer_ptr.as_ptr().add(offset) }
     }
 
@@ -419,12 +418,12 @@ impl<const N: usize> Consumer<N> {
     #[inline]
     fn update_cache(&mut self) -> bool {
         // fast-path -> check if something changed since last check
-        let tail_tag = unsafe { *self.buffer.tail_tag.get() };
+        let tail_tag = self.buffer.get_tail_tag();
         if self.last_tail_tag == tail_tag {
             false
         } else {
             // get actual data
-            let (head_index, head_state) = split_tag(unsafe { *self.buffer.head_tag.get() });
+            let (head_index, head_state) = split_tag(self.buffer.get_head_tag());
             let (tail_index, tail_state) = split_tag(tail_tag);
 
             // update lengths
@@ -463,7 +462,7 @@ impl<const N: usize> Consumer<N> {
         let bytes0 = min(self.length0, buf_len);
         if bytes0 > 0 {
             // copy data
-            let ptr = self.get_mut_ptr(self.head_index);
+            let ptr = self.get_ptr(self.head_index);
             unsafe { core::ptr::copy_nonoverlapping(ptr, buf.as_mut_ptr(), bytes0) };
 
             // update state
@@ -481,11 +480,16 @@ impl<const N: usize> Consumer<N> {
     fn read_second_buffer(&mut self, buf: &mut [u8], buf_len: usize, bytes0: usize) -> usize {
         let bytes1 = min(self.length1, buf_len - bytes0);
         if bytes1 > 0 {
+            // calculate offset - try to avoid modulo operation
+            let offset = if bytes0 == 0 {
+                self.head_index
+            } else {
+                (self.head_index + bytes0) % N
+            };
+
             // copy data
-            let ptr = self.get_mut_ptr((self.head_index + bytes0) % N);
-            unsafe {
-                core::ptr::copy_nonoverlapping(ptr, buf.as_mut_ptr().add(bytes0), bytes1);
-            }
+            let ptr = self.get_ptr(offset);
+            unsafe { core::ptr::copy_nonoverlapping(ptr, buf.as_mut_ptr().add(bytes0), bytes1) };
 
             // update state
             self.length1 -= bytes1;
@@ -512,30 +516,25 @@ impl<const N: usize> Consumer<N> {
 
         // check if we need to update our infos
         if self.length < buf_len && !self.update_cache() && self.length == 0 {
-            // FIXME: no spin-loop here!
-            core::hint::spin_loop();
-            return Err(Error::Empty);
-            /*return Err(std::io::Error::new(
-                std::io::ErrorKind::OutOfMemory,
-                "Buffer is empty",
-            ));*/
+            Err(Error::Empty)
+        } else {
+            //  -> check first slice
+            let bytes0 = self.read_first_buffer(buf, buf_len);
+
+            // if there are still bytes left in length0 - we are done
+            if self.length0 > 0 {
+                self.update_buffer(bytes0);
+                return Ok(bytes0);
+            }
+
+            //  -> check second slice
+            let bytes1 = self.read_second_buffer(buf, buf_len, bytes0);
+
+            // update state
+            self.update_buffer(bytes0 + bytes1);
+
+            Ok(bytes0 + bytes1)
         }
-
-        //  -> check first slice
-        let bytes0 = self.read_first_buffer(buf, buf_len);
-        // if there are still bytes left in length0 - we are done
-        if self.length0 > 0 {
-            self.update_buffer(bytes0);
-            return Ok(bytes0);
-        }
-
-        //  -> check second slice
-        let bytes1 = self.read_second_buffer(buf, buf_len, bytes0);
-
-        // update state
-        self.update_buffer(bytes0 + bytes1);
-
-        Ok(bytes0 + bytes1)
     }
 }
 
@@ -679,12 +678,12 @@ impl<const N: usize> Buffer<N> {
     /// Return the head-tag
     #[inline]
     fn get_head_tag(&self) -> usize {
-        unsafe { *self.head_tag.get() }
+        unsafe { core::ptr::read_volatile(self.head_tag.get()) }
     }
 
     /// Return the tail-tag
     #[inline]
     fn get_tail_tag(&self) -> usize {
-        unsafe { *self.tail_tag.get() }
+        unsafe { core::ptr::read_volatile(self.tail_tag.get()) }
     }
 }
