@@ -309,15 +309,15 @@ fn write_read_random_values_multiple_1001_1024_1m() {
 }
 
 #[test]
-fn silly() {
+fn generic() {
     const BUF_SIZE: usize = 1024;
-    const DATA: &[u8] = b"hello world";
+    const DATA: &[u32] = &[1, 2, 3, 4, 5, 6];
     const ITERATIONS: usize = 1_000;
 
-    let (mut producer, mut consumer) = Buffer::<BUF_SIZE, u8>::new();
+    let (mut producer, mut consumer) = Buffer::<BUF_SIZE, u32>::new();
     let t = std::thread::spawn(move || {
         // consumer
-        let mut buf = [0u8; DATA.len()];
+        let mut buf = [0u32; DATA.len()];
         for _ in 0..ITERATIONS {
             let mut read = 0;
             while read < DATA.len() {
