@@ -5,15 +5,8 @@ version = "0.1.0"
 edition = "2021"
 
 
-#[features]
-#default = []
-
 [profile.release]
-debug = true
-#strip = true
-
-[profile.bench]
-debug = true
+strip = true
 
 [dev-dependencies]
 criterion = "0.3.6"
@@ -25,7 +18,4 @@ name = "performance"
 harness = false
 
 [[example]]
-name = "intended"
-
-[[example]]
-name = "intended2"
+name = "simple"
