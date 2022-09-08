@@ -380,7 +380,7 @@ impl<const N: usize, T> Producer<N, T> {
             let bytes0 = self.write_first_buffer(buf, buf_len);
 
             // if there are still bytes left in length0 - we are done
-            if self.length0 > 0 {
+            if buf_len <= self.length0 {
                 self.update_buffer(bytes0);
                 return Ok(bytes0);
             }
@@ -598,7 +598,7 @@ impl<const N: usize, T> Consumer<N, T> {
             let bytes0 = self.read_first_buffer(buf, buf_len);
 
             // if there are still bytes left in length0 - we are done
-            if self.length0 > 0 {
+            if buf_len <= self.length0 {
                 self.update_buffer(bytes0);
                 return Ok(bytes0);
             }
