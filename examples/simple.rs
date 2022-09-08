@@ -5,7 +5,7 @@ const DATA: &[u8] = b"hello world";
 const ITERATIONS: usize = 100_000_000;
 
 fn main() {
-    let (mut producer, mut consumer) = Buffer::<BUF_SIZE>::new();
+    let (mut producer, mut consumer) = Buffer::<BUF_SIZE, u8>::new();
     std::thread::scope(|scope| {
         // consumer
         scope.spawn(|| {

@@ -1,5 +1,5 @@
 # Dichotomy
-A lock-free byte ring-buffer without atomic operations for handling access for producer and consumer.
+A lock-free generic ring-buffer without atomic operations for handling access for producer and consumer.
 
 ## Concept
 A ring-buffer consists of a head and a tail and thus can figure out where a producer can write to and a consumer can read from. There are three states a buffer

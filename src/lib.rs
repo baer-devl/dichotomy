@@ -1,4 +1,4 @@
-//! Dichotomy is a lock-free byte ring buffer
+//! Dichotomy is a lock-free generic ring buffer
 //!
 //! The buffer itself does not use any locks like [Mutex](std::sync::Mutex) or
 //! [RwLock](std::sync::RwLock), nor make use of atomics to synchronize the internal buffer access.
@@ -32,26 +32,32 @@
 //! Here are some examples of possible states of the two tags:
 //!
 //! ## Empty buffer
-//! ```
+//! `
 //! |--------X------------|
-//! ```
+//! `
+//!
 //! 'X' representing both indicies of the tags which pointing to the same position. In this special
 //! case, the state of both tags have to be the same. Thus makes it easy to check, if both tags are
 //! the same the buffer is empty.
 //!
 //! ## Filled buffer
-//! ```
+//! `
 //! |----H**********T-----|
+//! `
+//!
+//! `
 //! |**T---------------H**|
-//! ```
+//! `
+//!
 //! 'H' representing the index of `head_tag` and 'T' representing the index of `tail_tag`. As both
 //! indicies are different, it is safe to assume that there is data to read from and free space to
 //! write to. Both, the writeable and the readable space can easily be calculated.
 //!
 //! ## Full buffer
-//! ```
+//! `
 //! |*****************X***|
-//! ```
+//! `
+//!
 //! 'X' representing both indicies of the tags pointing to the same position. However, this time
 //! the state of the tags differ which indicates that the buffer must be full as the [Producer] had
 //! written data onto the buffer and the [Consumer] does not know about it yet.
@@ -127,6 +133,19 @@ fn split(tag: usize) -> (usize, usize) {
     (tag >> 8, tag & 0x00ff)
 }
 
+#[cfg(target_pointer_width = "64")]
+fn state(tag: usize) -> usize {
+    tag & 0xffff_ffff
+}
+#[cfg(target_pointer_width = "32")]
+fn state(tag: usize) -> usize {
+    tag & 0xffff
+}
+#[cfg(target_pointer_width = "16")]
+fn state(tag: usize) -> usize {
+    tag & 0x00ff
+}
+
 /// Merge index and state into a tag
 ///
 /// Handling 64 bit pointer width.
@@ -170,11 +189,11 @@ fn min(a: usize, b: usize) -> usize {
 /// The internal buffer is always guranteed to exist until both, [Producer] and [Consumer] are
 /// dropped. However, if the [Consumer] is dropped and the buffer is full, it will not be possible
 /// to write any data to the buffer again.
-pub struct Producer<const N: usize> {
+pub struct Producer<const N: usize, T> {
     /// Pointer to internal buffer to avoid access through `Arc`
-    buffer_ptr: NonNull<u8>,
+    buffer_ptr: NonNull<T>,
     /// Internal buffer
-    buffer: Arc<Buffer<N>>,
+    buffer: Arc<Buffer<N, T>>,
     /// Cached tail-index
     tail_index: usize,
     /// Cached tail-state
@@ -192,11 +211,11 @@ pub struct Producer<const N: usize> {
 }
 
 /// This is safe because we are using an atomic reference counter to share the internal buffer
-unsafe impl<const N: usize> Send for Producer<N> {}
+unsafe impl<const N: usize, T> Send for Producer<N, T> {}
 /// This is safe because [Producer] and [Consumer] have mutual exclusive access to the buffer
-unsafe impl<const N: usize> Sync for Producer<N> {}
+unsafe impl<const N: usize, T> Sync for Producer<N, T> {}
 
-impl<const N: usize> Producer<N> {
+impl<const N: usize, T> Producer<N, T> {
     /// Return the wrtiable length of the buffer
     ///
     /// Keep in mind that this is an expensive operation as it will not use the cached values.
@@ -220,7 +239,7 @@ impl<const N: usize> Producer<N> {
 
     /// Create a new instance with the correct initial values
     #[inline]
-    fn new(buffer: Arc<Buffer<N>>) -> Self {
+    fn new(buffer: Arc<Buffer<N, T>>) -> Self {
         Producer {
             buffer_ptr: buffer.buffer,
             buffer,
@@ -235,7 +254,7 @@ impl<const N: usize> Producer<N> {
 
     /// Return a mutable pointer from the internal buffer with the given offset
     #[inline]
-    fn get_mut_ptr(&mut self, offset: usize) -> *mut u8 {
+    fn get_mut_ptr(&mut self, offset: usize) -> *mut T {
         unsafe { self.buffer_ptr.as_ptr().add(offset) }
     }
 
@@ -296,7 +315,7 @@ impl<const N: usize> Producer<N> {
     /// This will write to the internal buffer until there is no space left or the buffer ends.
     /// Wrapped buffer writes are done in the `write_second_buffer` function.
     #[inline]
-    fn write_first_buffer(&mut self, buf: &[u8], buf_len: usize) -> usize {
+    fn write_first_buffer(&mut self, buf: &[T], buf_len: usize) -> usize {
         let bytes0 = min(self.length0, buf_len);
         if bytes0 > 0 {
             // copy data
@@ -316,7 +335,7 @@ impl<const N: usize> Producer<N> {
     /// This is only called if the cached buffer is wrapping around the internal buffer and the
     /// cache was not updated since.
     #[inline]
-    fn write_second_buffer(&mut self, buf: &[u8], buf_len: usize, bytes0: usize) -> usize {
+    fn write_second_buffer(&mut self, buf: &[T], buf_len: usize, bytes0: usize) -> usize {
         let bytes1 = min(self.length1, buf_len - bytes0);
         if bytes1 > 0 {
             // calculate offset - try to avoid modulo operation
@@ -339,7 +358,7 @@ impl<const N: usize> Producer<N> {
     }
 }
 
-impl<const N: usize> Producer<N> {
+impl<const N: usize, T> Producer<N, T> {
     /// Non blocking write to the buffer
     ///
     /// If [Consumer] got dropped it is still safe to write to the buffer until it is full.
@@ -350,7 +369,7 @@ impl<const N: usize> Producer<N> {
     /// On success, the amount of written data is returned. If the buffer is full, an error will be
     /// returned.
     #[inline]
-    pub fn write(&mut self, buf: &[u8]) -> Result<usize> {
+    pub fn write(&mut self, buf: &[T]) -> Result<usize> {
         let buf_len = buf.len();
 
         // check if we need to update our infos
@@ -383,11 +402,11 @@ impl<const N: usize> Producer<N> {
 /// The internal buffer is always guranteed to exist until both, [Producer] and [Consumer] are
 /// dropped. However, if the [Producer] part is dropped and the buffer is empty, it will not be
 /// possible to read any data from the buffer again.
-pub struct Consumer<const N: usize> {
+pub struct Consumer<const N: usize, T> {
     /// Pointer to internal buffer to avoid access through `Arc`
-    buffer_ptr: NonNull<u8>,
+    buffer_ptr: NonNull<T>,
     /// Internal buffer
-    buffer: Arc<Buffer<N>>,
+    buffer: Arc<Buffer<N, T>>,
     /// Cached head-index
     head_index: usize,
     /// Cached head-state
@@ -405,11 +424,11 @@ pub struct Consumer<const N: usize> {
 }
 
 /// This is safe because we are using an atomic reference counter to share the internal buffer
-unsafe impl<const N: usize> Send for Consumer<N> {}
+unsafe impl<const N: usize, T> Send for Consumer<N, T> {}
 /// This is safe because [Producer] and [Consumer] have mutual exclusive access to the buffer
-unsafe impl<const N: usize> Sync for Consumer<N> {}
+unsafe impl<const N: usize, T> Sync for Consumer<N, T> {}
 
-impl<const N: usize> Consumer<N> {
+impl<const N: usize, T> Consumer<N, T> {
     /// Return the readable length of the buffer
     ///
     /// Keep in mind that this is an expensive operation as it will not use the cached values.
@@ -433,7 +452,7 @@ impl<const N: usize> Consumer<N> {
 
     /// Create a new instance with the correct initial values
     #[inline]
-    fn new(buffer: Arc<Buffer<N>>) -> Self {
+    fn new(buffer: Arc<Buffer<N, T>>) -> Self {
         Consumer {
             buffer_ptr: buffer.buffer,
             buffer,
@@ -448,7 +467,7 @@ impl<const N: usize> Consumer<N> {
 
     /// Return a const pointer to the internal buffer with the given offset
     #[inline]
-    fn get_ptr(&mut self, offset: usize) -> *const u8 {
+    fn get_ptr(&mut self, offset: usize) -> *const T {
         unsafe { self.buffer_ptr.as_ptr().add(offset) }
     }
 
@@ -457,7 +476,7 @@ impl<const N: usize> Consumer<N> {
     /// This iwll update the local cached values as well as the value from the internal buffer.
     #[inline]
     fn update_buffer(&mut self, bytes: usize) {
-        self.head_state = self.last_tail_tag & 0x00ff_ffff;
+        self.head_state = state(self.last_tail_tag);
         self.head_index = (self.head_index + bytes) % N;
 
         let head_tag = merge(self.head_index, self.head_state);
@@ -513,7 +532,7 @@ impl<const N: usize> Consumer<N> {
     /// This will read from the internal buffer until ther is no data left or the buffer ends.
     /// Wrapped buffer reads are done in the `read_second_buffer` function.
     #[inline]
-    fn read_first_buffer(&mut self, buf: &mut [u8], buf_len: usize) -> usize {
+    fn read_first_buffer(&mut self, buf: &mut [T], buf_len: usize) -> usize {
         let bytes0 = min(self.length0, buf_len);
         if bytes0 > 0 {
             // copy data
@@ -533,7 +552,7 @@ impl<const N: usize> Consumer<N> {
     /// This is only called if the cached buffer is wrapping around the internal buffer and the
     /// cache was not updatred since.
     #[inline]
-    fn read_second_buffer(&mut self, buf: &mut [u8], buf_len: usize, bytes0: usize) -> usize {
+    fn read_second_buffer(&mut self, buf: &mut [T], buf_len: usize, bytes0: usize) -> usize {
         let bytes1 = min(self.length1, buf_len - bytes0);
         if bytes1 > 0 {
             // calculate offset - try to avoid modulo operation
@@ -557,7 +576,7 @@ impl<const N: usize> Consumer<N> {
 }
 
 /// Implement `Read` to make it easy to read from the buffer
-impl<const N: usize> Consumer<N> {
+impl<const N: usize, T> Consumer<N, T> {
     /// Non blocking read from the buffer
     ///
     /// If [Producer] got dropped it is still possible to read from the buffer until it is empty.
@@ -568,7 +587,7 @@ impl<const N: usize> Consumer<N> {
     /// On success, the amount of written data is returned. If the buffer is empty, an error will
     /// be returned.
     #[inline]
-    pub fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+    pub fn read(&mut self, buf: &mut [T]) -> Result<usize> {
         let buf_len = buf.len();
 
         // check if we need to update our infos
@@ -595,13 +614,13 @@ impl<const N: usize> Consumer<N> {
     }
 }
 
-/// Lock-free byte buffer without locks or atomic operations for synchronization
-pub struct Buffer<const N: usize> {
+/// Lock-free generic buffer without locks or atomic operations for synchronization
+pub struct Buffer<const N: usize, T> {
     /// Internal buffer accessed by [Producer] and [Consumer]
     ///
     /// Both parts will _always_ have mutual exclusive access to their corresponding parts which
     /// makes it safe to access this buffer at the same time.
-    buffer: NonNull<u8>,
+    buffer: NonNull<T>,
 
     /// Holds the index of the beginning of the readable data and the last known state
     ///
@@ -617,7 +636,7 @@ pub struct Buffer<const N: usize> {
     tail_tag: UnsafeCell<usize>,
 }
 
-impl<const N: usize> Buffer<N> {
+impl<const N: usize, T> Buffer<N, T> {
     /// Create a new `Buffer` instance
     ///
     /// Creating a new Buffer will give you a [Producer] and [Consumer]. Each of them can be moved
@@ -642,7 +661,7 @@ impl<const N: usize> Buffer<N> {
     ///
     /// const DATA: &[u8] = b"hello world";
     ///
-    /// let (mut producer, mut consumer) = Buffer::<1024>::new();
+    /// let (mut producer, mut consumer) = Buffer::<1024, u8>::new();
     /// std::thread::spawn(move || {
     ///     // spawn consumer thread
     ///     let mut buf = [0u8; 32];
@@ -663,19 +682,17 @@ impl<const N: usize> Buffer<N> {
     ///     }
     /// }
     /// ```
-    pub fn new() -> (Producer<N>, Consumer<N>) {
-        // ensure that the size does not exceed the maximum allowed size for a 64 bit system
+    #[cfg(target_pointer_width = "64")]
+    pub fn new() -> (Producer<N, T>, Consumer<N, T>) {
         #[cfg(target_pointer_width = "64")]
         assert!(u32::try_from(N).is_ok());
-        // ensure that the size does not exceed the maximum allowed size for a 32 bit system
         #[cfg(target_pointer_width = "32")]
         assert!(u16::try_from(N).is_ok());
-        // ensure that the size does not exceed the maximum allowed size for a 16 bit system
         #[cfg(target_pointer_width = "16")]
         assert!(u8::try_from(N).is_ok());
-
-        let buffer =
-            unsafe { NonNull::new_unchecked(ManuallyDrop::new(vec![0u8; N]).as_mut_ptr()) };
+        let buffer = unsafe {
+            NonNull::new_unchecked(ManuallyDrop::new(Vec::with_capacity(N)).as_mut_ptr())
+        };
 
         let buffer = Self {
             buffer,
@@ -692,7 +709,7 @@ impl<const N: usize> Buffer<N> {
 }
 
 /// Functions which are used by both, the [Producer] and the [Consumer]
-impl<const N: usize> Buffer<N> {
+impl<const N: usize, T> Buffer<N, T> {
     /// Return the length of the data on the buffer
     #[inline]
     fn len(&self) -> usize {

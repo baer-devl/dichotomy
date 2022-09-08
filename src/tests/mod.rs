@@ -15,7 +15,7 @@ fn write_read_random_value_empty_buffer() {
     const DATA: usize = 10;
     const SIZE: usize = 32;
 
-    let (mut producer, mut consumer) = Buffer::<SIZE>::new();
+    let (mut producer, mut consumer) = Buffer::<SIZE, u8>::new();
 
     // produce values
     let mut written = 0;
@@ -45,7 +45,7 @@ fn write_read_random_value_wrapping_buffer() {
     const DATA: usize = 24;
     const SIZE: usize = 32;
 
-    let (mut producer, mut consumer) = Buffer::<SIZE>::new();
+    let (mut producer, mut consumer) = Buffer::<SIZE, u8>::new();
 
     // produce value
     let mut written = 0;
@@ -96,7 +96,7 @@ fn write_read_random_values_byte_size_buffer() {
 
     let values: Arc<Mutex<VecDeque<[u8; DATA]>>> = Arc::new(Mutex::new(VecDeque::new()));
     let values_cpy = values.clone();
-    let (mut producer, mut consumer) = Buffer::<SIZE>::new();
+    let (mut producer, mut consumer) = Buffer::<SIZE, u8>::new();
 
     // consumer thread
     let t = std::thread::spawn(move || {
@@ -140,7 +140,7 @@ fn write_read_random_values_wrapping_multiple_times() {
 
     let values: Arc<Mutex<VecDeque<[u8; DATA]>>> = Arc::new(Mutex::new(VecDeque::new()));
     let values_cpy = values.clone();
-    let (mut producer, mut consumer) = Buffer::<SIZE>::new();
+    let (mut producer, mut consumer) = Buffer::<SIZE, u8>::new();
 
     // consumer thread
     let t = std::thread::spawn(move || {
@@ -184,7 +184,7 @@ fn write_read_random_values_multiple_10_1_1m() {
 
     let values: Arc<Mutex<VecDeque<[u8; DATA]>>> = Arc::new(Mutex::new(VecDeque::new()));
     let values_cpy = values.clone();
-    let (mut producer, mut consumer) = Buffer::<SIZE>::new();
+    let (mut producer, mut consumer) = Buffer::<SIZE, u8>::new();
 
     // consumer thread
     let t = std::thread::spawn(move || {
@@ -228,7 +228,7 @@ fn write_read_random_values_multiple_120_512_1m() {
 
     let values: Arc<Mutex<VecDeque<[u8; DATA]>>> = Arc::new(Mutex::new(VecDeque::new()));
     let values_cpy = values.clone();
-    let (mut producer, mut consumer) = Buffer::<SIZE>::new();
+    let (mut producer, mut consumer) = Buffer::<SIZE, u8>::new();
 
     // consumer thread
     let t = std::thread::spawn(move || {
@@ -272,7 +272,7 @@ fn write_read_random_values_multiple_1001_1024_1m() {
 
     let values: Arc<Mutex<VecDeque<[u8; DATA]>>> = Arc::new(Mutex::new(VecDeque::new()));
     let values_cpy = values.clone();
-    let (mut producer, mut consumer) = Buffer::<SIZE>::new();
+    let (mut producer, mut consumer) = Buffer::<SIZE, u8>::new();
 
     // consumer thread
     let t = std::thread::spawn(move || {
@@ -314,7 +314,7 @@ fn silly() {
     const DATA: &[u8] = b"hello world";
     const ITERATIONS: usize = 1_000;
 
-    let (mut producer, mut consumer) = Buffer::<BUF_SIZE>::new();
+    let (mut producer, mut consumer) = Buffer::<BUF_SIZE, u8>::new();
     let t = std::thread::spawn(move || {
         // consumer
         let mut buf = [0u8; DATA.len()];
