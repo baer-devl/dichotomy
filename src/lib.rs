@@ -1,84 +1,91 @@
 //! Dichotomy is a lock-free byte ring buffer
 //!
-//! The buffer itself does not use any locks like `Mutex` or `RwLock`, nor make use of atomics to
-//! synchronize the internal buffer access.
-//! The two parts, `Producer` and `Consumer` are guranteed to have mutual exclusive access to the
-//! buffer they need access to. Thus makes the buffer very performant as it does not need to handle
-//! locks.
+//! The buffer itself does not use any locks like [Mutex](std::sync::Mutex) or
+//! [RwLock](std::sync::RwLock), nor make use of atomics to synchronize the internal buffer access.
+//! The two parts, [Producer] and [Consumer] are guranteed to have mutual exclusive access to the
+//! buffer area they need access to. Thus makes the buffer very performant as it does not need to
+//! handle locks.
 //!
 //! There are two tags used to handle the internal access to the buffer called `head_tag` and
 //! `tail_tag`. Both will hold an index and a state. The index will give the position of the start
-//! and the end of written data. The state ensures that the `Consumer` part does have the
-//! information if there is more to read from.
-//! The `head_tag` can only be written by the `Consumer` and the `tail_tag` can only be written by
-//! the `Producer`. This and the fact that the processor _should_ be able to read an usize in a
+//! and the end of written data. The state ensures that the [Consumer] does have the information if
+//! there is more to read from.
+//! The `head_tag` can only be written by the [Consumer] and the `tail_tag` can only be written by
+//! the [Producer]. This and the fact that the processor _should_ be able to read an `usize` in a
 //! single instruction, makes it safe to access those values without locks.
 //!
 //! # How tags are used
 //! Lets first focus on the index part of the tags.
-//! The `Producer` holds its index in the `tail_tag` which marks the beginning of the writable
+//! The [Producer] holds its index in the `tail_tag` which marks the beginning of the writable
 //! buffer. If there is space left in the buffer, it will write into it and update the index.
-//! The very same is true for the `Consumer`, who holds its index in the `head_tag`, indicating the
-//! beginning of readable data. If the data gets consumed, it will update the index and free space
-//! on the buffer.
+//! The very same is true for the [Consumer], who holds its index in the `head_tag`, indicating the
+//! beginning of the readable data. If the data gets consumed, it will update the index and free
+//! space on the buffer.
 //! If both indicies are the same, this could either mean that the buffer is empty of full. To make
 //! a distinction of those two possibilities, we are using the state part of the tags which is an
 //! incrementing number changed by each write to the buffer.
-//! If the `Consumer` check if the buffer has data to read from, it will check if the tags will
+//! If the [Consumer] checks if the buffer has data to read from, it will check if the tags will
 //! differ. If that is the case, the index of both values will be used to calculate the readable
-//! size of the data. Each time the `Consumer` reads data from the buffer, it will update its state
-//! to the last known state of the `Producer` tag. This ensures that there will never be a false
-//! empty buffer because the state will always be different after the `Producer` wrote new data.
+//! size of the data. Each time the [Consumer] reads data from the buffer, it will update its state
+//! to the last known state of the [Producer] tag. This ensures that there will never be a false
+//! empty buffer because the state will always be different after the [Producer] wrote new data.
 //! Here are some examples of possible states of the two tags:
 //!
 //! ## Empty buffer
+//! ```
 //! |--------X------------|
-//!
+//! ```
 //! 'X' representing both indicies of the tags which pointing to the same position. In this special
 //! case, the state of both tags have to be the same. Thus makes it easy to check, if both tags are
-//! the same indicating that the buffer is empty.
+//! the same the buffer is empty.
 //!
 //! ## Filled buffer
+//! ```
 //! |----H**********T-----|
-//!
+//! |**T---------------H**|
+//! ```
 //! 'H' representing the index of `head_tag` and 'T' representing the index of `tail_tag`. As both
 //! indicies are different, it is safe to assume that there is data to read from and free space to
 //! write to. Both, the writeable and the readable space can easily be calculated.
 //!
 //! ## Full buffer
+//! ```
 //! |*****************X***|
-//!
+//! ```
 //! 'X' representing both indicies of the tags pointing to the same position. However, this time
-//! the state of the tags differ which indicates that the buffer must be full as the `Producer` had
-//! written data onto the buffer and the `Consumer` does not know about it yet.
+//! the state of the tags differ which indicates that the buffer must be full as the [Producer] had
+//! written data onto the buffer and the [Consumer] does not know about it yet.
 //!
 //! # Safety
-//! The whole safety of this implementation relies on the fact that the processor can read an usize
-//! value with a single instruction. However, there are processor implementations which do not work
-//! like this. Given that they are rare we still recommend to double check if your processor can
-//! read a single usize in one instruction.
+//! The whole safety of this implementation relies on the fact that the processor can read/write an
+//! `usize` value with a single instruction. However, there are processor implementations which do
+//! not work like this. Given that they are rare we still recommend to double check if your
+//! processor can read/write an `usize` in a single instruction.
 //!
 //! # Limits
-//! As we are using the usize value as two different parts (index and state), the maximum amount of
+//! As we are using holding an index and a state in a single `usize`, the maximum amount of
 //! elements in this buffer is limited by the architecture it runs on. For a 64 bit architecture it
-//! will be 32 bits. On a 32 bit architecture this will be 16 bits. We handle those variants in our
-//! implementation.
+//! will be 32 bits, on a 32 bit architecture this will be 16 bits and on a 16bit architecture this
+//! will only be 8 bits. We handle those variants in our implementation.
 use arc::Arc;
 use core::{cell::UnsafeCell, fmt::Debug, mem::ManuallyDrop, ptr::NonNull};
 
 /// Minimal implementation of `Arc`
+///
+/// The reason for this is to reduce the dependency on `std` as this lib will be used in a `no_std`
+/// environment.
 mod arc;
 #[cfg(test)]
 mod tests;
 
-/// Helper to make it easier to handle errors when writing or reading to the buffer
+/// Result to handle errors when writing or reading to the buffer
 pub type Result<T> = core::result::Result<T, Error>;
 
-/// Error codes for read/write
+/// Error codes for read and write
 ///
-/// Keep in mind that those error codes do _not_ check if one of the parts (`Producer` or
-/// `Consumer`) already has dropped. This is intended and needs to be handled by the implementation
-/// which is using this buffer.
+/// Keep in mind that those error codes do _not_ check if the [Producer] or [Consumer] got dropped.
+/// This is intentional and it needs to be handled by the implementation which is using this
+/// buffer.
 pub enum Error {
     /// Unable to write to buffer because it is full
     Full,
@@ -96,9 +103,55 @@ impl Debug for Error {
 }
 
 /// Split tag into its two parts: index and state
+///
+/// Handling 64 bit pointer width.
+#[cfg(target_pointer_width = "64")]
 #[inline]
-fn split_tag(tag: usize) -> (usize, usize) {
-    (tag >> 32, tag & 0x00ff_ffff)
+fn split(tag: usize) -> (usize, usize) {
+    (tag >> 32, tag & 0xffff_ffff)
+}
+/// Split tag into its two parts: index and state
+///
+/// Handling 32 bit pointer width.
+#[cfg(target_pointer_width = "32")]
+#[inline]
+fn split(tag: usize) -> (usize, usize) {
+    (tag >> 16, tag & 0xffff)
+}
+/// Split tag into its two parts: index and state
+///
+/// Handling 16 bit pointer width.
+#[cfg(target_pointer_width = "16")]
+#[inline]
+fn split(tag: usize) -> (usize, usize) {
+    (tag >> 8, tag & 0x00ff)
+}
+
+/// Merge index and state into a tag
+///
+/// Handling 64 bit pointer width.
+#[cfg(target_pointer_width = "64")]
+#[inline]
+fn merge(index: usize, state: usize) -> usize {
+    index << 32 | state
+}
+
+/// Merge index and state into a tag
+///
+/// Handling 32 bit pointer width.
+#[cfg(target_pointer_width = "32")]
+#[inline]
+fn merge(index: usize, state: usize) -> usize {
+    index << 16 | state
+}
+
+/// Merge index and state into a tag
+///
+/// Handling 16 bit pointer width.
+#[cfg(target_pointer_width = "16")]
+#[inline]
+fn merge(index: usize, state: usize) -> usize {
+    index << 8 | state
 }
 
 /// Return the smallest value
@@ -111,12 +164,12 @@ fn min(a: usize, b: usize) -> usize {
     }
 }
 
-/// Provide write operations to the buffer
+/// Provide write operation to the buffer
 ///
 /// # Safety
-/// It is safe to move this instance into other threads as the `Arc` ensures that the internal
-/// buffer does exist. However, if the `Consumer` part is dropped and the buffer is full, it will
-/// not be possible to write more data to the buffer.
+/// The internal buffer is always guranteed to exist until both, [Producer] and [Consumer] are
+/// dropped. However, if the [Consumer] is dropped and the buffer is full, it will not be possible
+/// to write any data to the buffer again.
 pub struct Producer<const N: usize> {
     /// Pointer to internal buffer to avoid access through `Arc`
     buffer_ptr: NonNull<u8>,
@@ -134,31 +187,31 @@ pub struct Producer<const N: usize> {
     /// As this will be checked regulary its kept in a single field
     length: usize,
     /// Last known state of head-tag
-    /// This is used to determine if we can update the cache.
+    /// This is used to determine if we can update the cache
     last_head_tag: usize,
 }
 
-/// This is safe because we are using `Arc` to share the internal buffer
+/// This is safe because we are using an atomic reference counter to share the internal buffer
 unsafe impl<const N: usize> Send for Producer<N> {}
-/// This is safe because we are using `Arc` to share the internal buffer
+/// This is safe because [Producer] and [Consumer] have mutual exclusive access to the buffer
 unsafe impl<const N: usize> Sync for Producer<N> {}
 
 impl<const N: usize> Producer<N> {
     /// Return the wrtiable length of the buffer
     ///
-    /// Keep in mind that this is an expensive operation.
+    /// Keep in mind that this is an expensive operation as it will not use the cached values.
     pub fn len(&self) -> usize {
         N - self.buffer.len()
     }
 
     /// Return if the buffer is full
     ///
-    /// Keep in mind that this is an expensive operation.
+    /// Keep in mind that this is an expensive operation as it will not use the cached values.
     pub fn is_full(&self) -> bool {
         self.buffer.len() == N
     }
 
-    /// Return if `Consumer` part was dropped
+    /// Return if [Consumer] was dropped
     ///
     /// Keep in mind that this is an expensive operation.
     pub fn is_abandoned(&self) -> bool {
@@ -195,13 +248,13 @@ impl<const N: usize> Producer<N> {
         self.tail_state += 1;
         self.tail_index = (self.tail_index + bytes) % N;
 
-        let tail_tag = self.tail_index << 32 | self.tail_state;
+        let tail_tag = merge(self.tail_index, self.tail_state);
 
         // set new uncached value to the buffer
         unsafe { *self.buffer.tail_tag.get() = tail_tag };
     }
 
-    /// Update cache of `Producer`
+    /// Update local cache
     ///
     /// Get the values from the internal buffer and update the cache. If there was no change since
     /// the last check, we will return false indicating that no value changed.
@@ -213,8 +266,8 @@ impl<const N: usize> Producer<N> {
             false
         } else {
             // get actual data
-            let (head_index, _head_state) = split_tag(head_tag);
-            let (tail_index, last_state) = split_tag(self.buffer.get_tail_tag());
+            let (head_index, _head_state) = split(head_tag);
+            let (tail_index, last_state) = split(self.buffer.get_tail_tag());
 
             // update lengths
             if head_index > tail_index {
@@ -240,8 +293,8 @@ impl<const N: usize> Producer<N> {
 
     /// Write to the frist cached buffer
     ///
-    /// This will be the most called write as the second buffer is only used if the buffer is
-    /// wrapping.
+    /// This will write to the internal buffer until there is no space left or the buffer ends.
+    /// Wrapped buffer writes are done in the `write_second_buffer` function.
     #[inline]
     fn write_first_buffer(&mut self, buf: &[u8], buf_len: usize) -> usize {
         let bytes0 = min(self.length0, buf_len);
@@ -260,7 +313,8 @@ impl<const N: usize> Producer<N> {
 
     /// Write to the second cached buffer
     ///
-    /// This is only called if the cached buffer is wrapping around the internal buffer.
+    /// This is only called if the cached buffer is wrapping around the internal buffer and the
+    /// cache was not updated since.
     #[inline]
     fn write_second_buffer(&mut self, buf: &[u8], buf_len: usize, bytes0: usize) -> usize {
         let bytes1 = min(self.length1, buf_len - bytes0);
@@ -288,12 +342,13 @@ impl<const N: usize> Producer<N> {
 impl<const N: usize> Producer<N> {
     /// Non blocking write to the buffer
     ///
+    /// If [Consumer] got dropped it is still safe to write to the buffer until it is full.
+    /// However, the data will never be read from the buffer and all writes will return an
+    /// error after the buffer is full. The implementation needs to take care of that!
+    ///
+    /// # Returns
     /// On success, the amount of written data is returned. If the buffer is full, an error will be
     /// returned.
-    /// If the `Consumer` part got dropped it is still possible to write to the buffer until it is
-    /// full. However, the data will never be read from the buffer and all writes will return an
-    /// error indicating that the buffer is full. The implementation needs to take care of
-    /// abandoned `Consumer`!
     #[inline]
     pub fn write(&mut self, buf: &[u8]) -> Result<usize> {
         let buf_len = buf.len();
@@ -322,12 +377,12 @@ impl<const N: usize> Producer<N> {
     }
 }
 
-/// Readable part of the buffer
+/// Provide read operation to the buffer
 ///
 /// # Safety
-/// It is safe to move this instance into other threads as the `Arc` ensures that the internal
-/// buffer does exist. However, if the `Producer` part is dropped and the buffer is empty, it will
-/// not be possible to read more data from the buffer.
+/// The internal buffer is always guranteed to exist until both, [Producer] and [Consumer] are
+/// dropped. However, if the [Producer] part is dropped and the buffer is empty, it will not be
+/// possible to read any data from the buffer again.
 pub struct Consumer<const N: usize> {
     /// Pointer to internal buffer to avoid access through `Arc`
     buffer_ptr: NonNull<u8>,
@@ -349,27 +404,27 @@ pub struct Consumer<const N: usize> {
     last_tail_tag: usize,
 }
 
-/// This is safe because we are using `Arc` to share the internal buffer
+/// This is safe because we are using an atomic reference counter to share the internal buffer
 unsafe impl<const N: usize> Send for Consumer<N> {}
-/// This is safe because we are using `Arc` to share the internal buffer
+/// This is safe because [Producer] and [Consumer] have mutual exclusive access to the buffer
 unsafe impl<const N: usize> Sync for Consumer<N> {}
 
 impl<const N: usize> Consumer<N> {
     /// Return the readable length of the buffer
     ///
-    /// Keep in mind that this is an expensive operation.
+    /// Keep in mind that this is an expensive operation as it will not use the cached values.
     pub fn len(&self) -> usize {
         self.buffer.len()
     }
 
     /// Return if the buffer is empty
     ///
-    /// Keep in mind that this is an expensive operation.
+    /// Keep in mind that this is an expensive operation as it will not use the cached values.
     pub fn is_empty(&self) -> bool {
         self.buffer.is_empty()
     }
 
-    /// Return if `Producer` was dropped
+    /// Return if [Producer] was dropped
     ///
     /// Keep in mind that this is an expensive operation.
     pub fn is_abandoned(&self) -> bool {
@@ -391,7 +446,7 @@ impl<const N: usize> Consumer<N> {
         }
     }
 
-    /// Return a mutable pointer to the internal buffer with the given offset
+    /// Return a const pointer to the internal buffer with the given offset
     #[inline]
     fn get_ptr(&mut self, offset: usize) -> *const u8 {
         unsafe { self.buffer_ptr.as_ptr().add(offset) }
@@ -411,7 +466,7 @@ impl<const N: usize> Consumer<N> {
         unsafe { *self.buffer.head_tag.get() = head_tag };
     }
 
-    /// Update cache of the `Consumer`
+    /// Update local cache
     ///
     /// Get the values from the internal buffer and update the cache. If there was no change since
     /// the last check, it will return false indicating that no value changed.
@@ -423,8 +478,8 @@ impl<const N: usize> Consumer<N> {
             false
         } else {
             // get actual data
-            let (head_index, head_state) = split_tag(self.buffer.get_head_tag());
-            let (tail_index, tail_state) = split_tag(tail_tag);
+            let (head_index, head_state) = split(self.buffer.get_head_tag());
+            let (tail_index, tail_state) = split(tail_tag);
 
             // update lengths
             if head_index == tail_index && head_state != tail_state {
@@ -455,8 +510,8 @@ impl<const N: usize> Consumer<N> {
 
     /// Read from the frist cached buffer
     ///
-    /// This will be the most called read as the second buffer is only used if the buffer is
-    /// wrapping.
+    /// This will read from the internal buffer until ther is no data left or the buffer ends.
+    /// Wrapped buffer reads are done in the `read_second_buffer` function.
     #[inline]
     fn read_first_buffer(&mut self, buf: &mut [u8], buf_len: usize) -> usize {
         let bytes0 = min(self.length0, buf_len);
@@ -475,7 +530,8 @@ impl<const N: usize> Consumer<N> {
 
     /// Read from the second cached buffer
     ///
-    /// This is only called if the cached buffer is wrapping around the internal buffer.
+    /// This is only called if the cached buffer is wrapping around the internal buffer and the
+    /// cache was not updatred since.
     #[inline]
     fn read_second_buffer(&mut self, buf: &mut [u8], buf_len: usize, bytes0: usize) -> usize {
         let bytes1 = min(self.length1, buf_len - bytes0);
@@ -504,12 +560,13 @@ impl<const N: usize> Consumer<N> {
 impl<const N: usize> Consumer<N> {
     /// Non blocking read from the buffer
     ///
+    /// If [Producer] got dropped it is still possible to read from the buffer until it is empty.
+    /// However, the buffer will never be written again and all future reads will return an
+    /// error indicating that the buffer is empty. The implementation needs to take care of that!
+    ///
+    /// # Returns
     /// On success, the amount of written data is returned. If the buffer is empty, an error will
     /// be returned.
-    /// If the `Producer` part got dropped it is still possible to read from the buffer until it is
-    /// empty. However, the buffer will never be written again all further reads will return an
-    /// error indicating that the buffer is empty. The implementation needs to take care of
-    /// abandoned `Producer`!
     #[inline]
     pub fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         let buf_len = buf.len();
@@ -540,32 +597,32 @@ impl<const N: usize> Consumer<N> {
 
 /// Lock-free byte buffer without locks or atomic operations for synchronization
 pub struct Buffer<const N: usize> {
-    /// Internal buffer accessed by `Producer` and `Consumer`
+    /// Internal buffer accessed by [Producer] and [Consumer]
     ///
     /// Both parts will _always_ have mutual exclusive access to their corresponding parts which
     /// makes it safe to access this buffer at the same time.
     buffer: NonNull<u8>,
 
-    /// Holds the index of the beginning of the readable data and the last known state of tail
+    /// Holds the index of the beginning of the readable data and the last known state
     ///
     /// The state part is needed to ensure that we can distinguish if the buffer is full or emtpy.
-    /// This field can only be changed by the `Consumer`. The `Producer` is only allowed to read.
+    /// This field can only be changed by the [Consumer]. The [Producer] is only allowed to read.
     head_tag: UnsafeCell<usize>,
 
     /// Holds the index of the beginning of the writeable data and its state
     ///
     /// The state gets incremented each time the buffer got written. This makes it easy for the
-    /// `Consumer` to track if there were changes.
-    /// This field can only be changed by the `Producer`. The `Consumer` is only allowed to read.
+    /// [Consumer] to track if there were changes.
+    /// This field can only be changed by the [Producer]. The [Consumer] is only allowed to read.
     tail_tag: UnsafeCell<usize>,
 }
 
 impl<const N: usize> Buffer<N> {
     /// Create a new `Buffer` instance
     ///
-    /// Creating a new Buffer will give you the `Producer` and `Consumer` parts. Each of them can
-    /// be moved to different threads and can be used without additional locks.
-    /// The `Producer` can be used to write data onto the buffer, while the `Consumer` will be used
+    /// Creating a new Buffer will give you a [Producer] and [Consumer]. Each of them can be moved
+    /// to different threads and do not need any additional locks.
+    /// The [Producer] can be used to write data onto the buffer, while the [Consumer] will be used
     /// to read from it.
     ///
     /// # Panics
@@ -634,7 +691,7 @@ impl<const N: usize> Buffer<N> {
     }
 }
 
-/// Functions which are used by both, the `Producer` and the `Consumer`
+/// Functions which are used by both, the [Producer] and the [Consumer]
 impl<const N: usize> Buffer<N> {
     /// Return the length of the data on the buffer
     #[inline]
@@ -647,8 +704,8 @@ impl<const N: usize> Buffer<N> {
             return 0;
         }
 
-        let (head_index, head_state) = split_tag(head_tag);
-        let (tail_index, tail_state) = split_tag(tail_tag);
+        let (head_index, head_state) = split(head_tag);
+        let (tail_index, tail_state) = split(tail_tag);
 
         // check if buffer is full
         if head_index == tail_index && head_state != tail_state {

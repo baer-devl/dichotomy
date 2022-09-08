@@ -3,28 +3,31 @@ use core::ptr::NonNull;
 use core::sync::atomic::AtomicUsize;
 
 /// Actual data and a ref-counter to keep track of shared instances
+///
+/// This struct will be put on the heap and live as long as there are references left to it.
 struct Inner<T: ?Sized> {
-    /// Reference counter to keep track of clones from `Arc`
+    /// Reference counter to keep track of clones from [Arc]
     ref_count: AtomicUsize,
-    /// Pointer to leaked data
+    /// Pointer to data
     data: T,
 }
 
 /// Helper to share the internal buffer
 ///
-/// Basically a lower spec `Arc` implementation which does implement the bare minimum to make it
-/// work. If all references to the underlying data got dropped, we drop the internal buffer.
+/// Basically a lower spec [Arc](std::sync::Arc) implementation which does implement the bare
+/// minimum to make it work. If all references to the underlying data got dropped, we drop the
+/// internal buffer.
 pub(crate) struct Arc<T> {
     /// Pointer to `Inner` holding the data until no references are available
     inner: NonNull<Inner<T>>,
 }
 
 impl<T> Arc<T> {
-    /// Create a new atomic reference counter to share the buffer between producer and consumer
+    /// Create a new atomic reference counter to keep track of references
     ///
     /// We need to have atomic references in order to keep track when both entities are dropped, we
     /// will drop the internal data if no references are left. This must be done manually, as we
-    /// leaked the data.
+    /// leaked the data onto the heap.
     pub(crate) fn new(data: T) -> Self {
         let inner = Inner {
             ref_count: AtomicUsize::new(1),
