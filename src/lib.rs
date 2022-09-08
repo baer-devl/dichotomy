@@ -460,7 +460,7 @@ impl<const N: usize> Consumer<N> {
         self.head_state = self.last_tail_tag & 0x00ff_ffff;
         self.head_index = (self.head_index + bytes) % N;
 
-        let head_tag = self.head_index << 32 | self.head_state;
+        let head_tag = merge(self.head_index, self.head_state);
 
         // set new value
         unsafe { *self.buffer.head_tag.get() = head_tag };
