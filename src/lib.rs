@@ -135,6 +135,22 @@ fn split(tag: usize) -> (usize, usize) {
 
 #[cfg(target_pointer_width = "64")]
 #[inline]
+fn index(tag: usize) -> usize {
+    tag >> 32
+}
+#[cfg(target_pointer_width = "32")]
+#[inline]
+fn index(tag: usize) -> usize {
+    tag >> 16
+}
+#[cfg(target_pointer_width = "16")]
+#[inline]
+fn index(tag: usize) -> usize {
+    tag >> 8
+}
+
+#[cfg(target_pointer_width = "64")]
+#[inline]
 fn state(tag: usize) -> usize {
     tag & 0xffff_ffff
 }
@@ -197,6 +213,8 @@ pub struct Producer<const N: usize, T> {
     buffer_ptr: NonNull<T>,
     /// Internal buffer
     buffer: Arc<Buffer<N, T>>,
+
+    tail_ptr: *mut usize,
     /// Cached tail-index
     tail_index: usize,
     /// Cached tail-state
@@ -243,9 +261,12 @@ impl<const N: usize, T> Producer<N, T> {
     /// Create a new instance with the correct initial values
     #[inline]
     fn new(buffer: Arc<Buffer<N, T>>) -> Self {
+        let tail_ptr = buffer.tail_tag.get();
+
         Producer {
             buffer_ptr: buffer.buffer,
             buffer,
+            tail_ptr,
             tail_index: 0,
             tail_state: 0,
             length0: N,
@@ -273,7 +294,7 @@ impl<const N: usize, T> Producer<N, T> {
         let tail_tag = merge(self.tail_index, self.tail_state);
 
         // set new uncached value to the buffer
-        unsafe { *self.buffer.tail_tag.get() = tail_tag };
+        unsafe { *self.tail_ptr = tail_tag };
     }
 
     /// Update local cache
@@ -288,8 +309,8 @@ impl<const N: usize, T> Producer<N, T> {
             false
         } else {
             // get actual data
-            let (head_index, _head_state) = split(head_tag);
-            let (tail_index, last_state) = split(self.buffer.get_tail_tag());
+            let head_index = index(head_tag);
+            let (tail_index, last_state) = split(unsafe { *self.tail_ptr });
 
             // update lengths
             if head_index > tail_index {
@@ -410,6 +431,8 @@ pub struct Consumer<const N: usize, T> {
     buffer_ptr: NonNull<T>,
     /// Internal buffer
     buffer: Arc<Buffer<N, T>>,
+
+    head_ptr: *mut usize,
     /// Cached head-index
     head_index: usize,
     /// Cached head-state
@@ -456,9 +479,12 @@ impl<const N: usize, T> Consumer<N, T> {
     /// Create a new instance with the correct initial values
     #[inline]
     fn new(buffer: Arc<Buffer<N, T>>) -> Self {
+        let head_ptr = buffer.head_tag.get();
+
         Consumer {
             buffer_ptr: buffer.buffer,
             buffer,
+            head_ptr,
             head_index: 0,
             head_state: 0,
             length0: 0,
@@ -485,7 +511,7 @@ impl<const N: usize, T> Consumer<N, T> {
         let head_tag = merge(self.head_index, self.head_state);
 
         // set new value
-        unsafe { *self.buffer.head_tag.get() = head_tag };
+        unsafe { *self.head_ptr = head_tag };
     }
 
     /// Update local cache
@@ -500,7 +526,7 @@ impl<const N: usize, T> Consumer<N, T> {
             false
         } else {
             // get actual data
-            let (head_index, head_state) = split(self.buffer.get_head_tag());
+            let (head_index, head_state) = split(unsafe { *self.head_ptr });
             let (tail_index, tail_state) = split(tail_tag);
 
             // update lengths
