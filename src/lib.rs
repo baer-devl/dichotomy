@@ -111,54 +111,43 @@ impl Debug for Error {
 /// Split tag into its two parts: index and state
 ///
 /// Handling 64 bit pointer width.
-#[cfg(target_pointer_width = "64")]
 #[inline]
 fn split(tag: usize) -> (usize, usize) {
-    (tag >> 32, tag & 0xffff_ffff)
-}
-/// Split tag into its two parts: index and state
-///
-/// Handling 32 bit pointer width.
-#[cfg(target_pointer_width = "32")]
-#[inline]
-fn split(tag: usize) -> (usize, usize) {
-    (tag >> 16, tag & 0xffff)
-}
-/// Split tag into its two parts: index and state
-///
-/// Handling 16 bit pointer width.
-#[cfg(target_pointer_width = "16")]
-#[inline]
-fn split(tag: usize) -> (usize, usize) {
-    (tag >> 8, tag & 0x00ff)
+    (index(tag), state(tag))
 }
 
+/// Get the index part of the tag
 #[cfg(target_pointer_width = "64")]
 #[inline]
 fn index(tag: usize) -> usize {
     tag >> 32
 }
+/// Get the index part of the tag
 #[cfg(target_pointer_width = "32")]
 #[inline]
 fn index(tag: usize) -> usize {
     tag >> 16
 }
+/// Get the index part of the tag
 #[cfg(target_pointer_width = "16")]
 #[inline]
 fn index(tag: usize) -> usize {
     tag >> 8
 }
 
+/// Get the state part of the tag
 #[cfg(target_pointer_width = "64")]
 #[inline]
 fn state(tag: usize) -> usize {
     tag & 0xffff_ffff
 }
+/// Get the state part of the tag
 #[cfg(target_pointer_width = "32")]
 #[inline]
 fn state(tag: usize) -> usize {
     tag & 0xffff
 }
+/// Get the state part of the tag
 #[cfg(target_pointer_width = "16")]
 #[inline]
 fn state(tag: usize) -> usize {
@@ -213,7 +202,7 @@ pub struct Producer<const N: usize, T> {
     buffer_ptr: NonNull<T>,
     /// Internal buffer
     buffer: Arc<Buffer<N, T>>,
-
+    /// Faster access than using it over the buffer object
     tail_ptr: *mut usize,
     /// Cached tail-index
     tail_index: usize,
@@ -431,7 +420,7 @@ pub struct Consumer<const N: usize, T> {
     buffer_ptr: NonNull<T>,
     /// Internal buffer
     buffer: Arc<Buffer<N, T>>,
-
+    /// Faster access than using it over the buffer object
     head_ptr: *mut usize,
     /// Cached head-index
     head_index: usize,
