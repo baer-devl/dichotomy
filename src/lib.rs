@@ -134,14 +134,17 @@ fn split(tag: usize) -> (usize, usize) {
 }
 
 #[cfg(target_pointer_width = "64")]
+#[inline]
 fn state(tag: usize) -> usize {
     tag & 0xffff_ffff
 }
 #[cfg(target_pointer_width = "32")]
+#[inline]
 fn state(tag: usize) -> usize {
     tag & 0xffff
 }
 #[cfg(target_pointer_width = "16")]
+#[inline]
 fn state(tag: usize) -> usize {
     tag & 0x00ff
 }
