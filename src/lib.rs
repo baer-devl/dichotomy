@@ -278,7 +278,13 @@ impl<const N: usize, T> Producer<N, T> {
     fn update_buffer(&mut self, bytes: usize) {
         // update cached values
         self.tail_state += 1;
-        self.tail_index = (self.tail_index + bytes) % N;
+
+        let new_index = self.tail_index + bytes;
+        if new_index == N {
+            self.tail_index = 0;
+        } else {
+            self.tail_index = new_index;
+        }
 
         let tail_tag = merge(self.tail_index, self.tail_state);
 
@@ -299,24 +305,22 @@ impl<const N: usize, T> Producer<N, T> {
         } else {
             // get actual data
             let head_index = index(head_tag);
-            let (tail_index, last_state) = split(unsafe { *self.tail_ptr });
+            //let (tail_index, last_state) = split(unsafe { *self.tail_ptr });
 
             // update lengths
-            if head_index > tail_index {
+            if head_index > self.tail_index {
                 // |***L--------Z***|
-                self.length0 = head_index - tail_index;
+                self.length0 = head_index - self.tail_index;
                 self.length1 = 0;
                 self.length = self.length0;
             } else {
                 // |--Z*****L-------|
-                self.length0 = N - tail_index;
+                self.length0 = N - self.tail_index;
                 self.length1 = head_index;
                 self.length = self.length0 + self.length1;
             };
 
             // update rest
-            self.tail_index = tail_index;
-            self.tail_state = last_state;
             self.last_head_tag = head_tag;
 
             true
@@ -348,19 +352,12 @@ impl<const N: usize, T> Producer<N, T> {
     /// This is only called if the cached buffer is wrapping around the internal buffer and the
     /// cache was not updated since.
     #[inline]
-    fn write_second_buffer(&mut self, buf: &[T], buf_len: usize, bytes0: usize) -> usize {
-        let bytes1 = min(self.length1, buf_len - bytes0);
+    fn write_second_buffer(&mut self, buf: &[T], buf_len: usize) -> usize {
+        let bytes1 = min(self.length1, buf_len);
         if bytes1 > 0 {
-            // calculate offset - try to avoid modulo operation
-            let offset = if bytes0 == 0 {
-                self.tail_index
-            } else {
-                (self.tail_index + bytes0) % N
-            };
-
             // copy data
-            let ptr = self.get_mut_ptr(offset);
-            unsafe { core::ptr::copy_nonoverlapping(buf.as_ptr().add(bytes0), ptr, bytes1) };
+            let ptr = self.get_mut_ptr(self.tail_index);
+            unsafe { core::ptr::copy_nonoverlapping(buf.as_ptr(), ptr, bytes1) };
 
             // update state
             self.length1 -= bytes1;
@@ -393,18 +390,18 @@ impl<const N: usize, T> Producer<N, T> {
             let bytes0 = self.write_first_buffer(buf, buf_len);
 
             // if there are still bytes left in length0 - we are done
-            if buf_len <= self.length0 {
+            if bytes0 > 0 {
                 self.update_buffer(bytes0);
-                return Ok(bytes0);
+                Ok(bytes0)
+            } else {
+                //  -> check second slice
+                let bytes1 = self.write_second_buffer(buf, buf_len);
+
+                // update state
+                self.update_buffer(bytes1);
+
+                Ok(bytes1)
             }
-
-            //  -> check second slice
-            let bytes1 = self.write_second_buffer(buf, buf_len, bytes0);
-
-            // update state
-            self.update_buffer(bytes0 + bytes1);
-
-            Ok(bytes0 + bytes1)
         }
     }
 }
@@ -495,7 +492,13 @@ impl<const N: usize, T> Consumer<N, T> {
     #[inline]
     fn update_buffer(&mut self, bytes: usize) {
         self.head_state = state(self.last_tail_tag);
-        self.head_index = (self.head_index + bytes) % N;
+
+        let new_index = self.head_index + bytes;
+        if new_index == N {
+            self.head_index = 0;
+        } else {
+            self.head_index = new_index;
+        }
 
         let head_tag = merge(self.head_index, self.head_state);
 
@@ -515,30 +518,27 @@ impl<const N: usize, T> Consumer<N, T> {
             false
         } else {
             // get actual data
-            let (head_index, head_state) = split(unsafe { *self.head_ptr });
             let (tail_index, tail_state) = split(tail_tag);
 
             // update lengths
-            if head_index == tail_index && head_state != tail_state {
+            if self.head_index == tail_index && self.head_state != tail_state {
                 // |****Z***********|
-                self.length0 = N - head_index;
-                self.length1 = head_index;
+                self.length0 = N - self.head_index;
+                self.length1 = self.head_index;
                 self.length = N;
-            } else if head_index > tail_index {
+            } else if self.head_index > tail_index {
                 // |***L--------Z***|
-                self.length0 = N - head_index;
+                self.length0 = N - self.head_index;
                 self.length1 = tail_index;
                 self.length = self.length0 + self.length1;
             } else {
                 // |--Z*****L-------|
-                self.length0 = tail_index - head_index;
+                self.length0 = tail_index - self.head_index;
                 self.length1 = 0;
                 self.length = self.length0;
             };
 
             // update rest
-            self.head_index = head_index;
-            self.head_state = head_state;
             self.last_tail_tag = tail_tag;
 
             true
@@ -570,19 +570,12 @@ impl<const N: usize, T> Consumer<N, T> {
     /// This is only called if the cached buffer is wrapping around the internal buffer and the
     /// cache was not updatred since.
     #[inline]
-    fn read_second_buffer(&mut self, buf: &mut [T], buf_len: usize, bytes0: usize) -> usize {
-        let bytes1 = min(self.length1, buf_len - bytes0);
+    fn read_second_buffer(&mut self, buf: &mut [T], buf_len: usize) -> usize {
+        let bytes1 = min(self.length1, buf_len);
         if bytes1 > 0 {
-            // calculate offset - try to avoid modulo operation
-            let offset = if bytes0 == 0 {
-                self.head_index
-            } else {
-                (self.head_index + bytes0) % N
-            };
-
             // copy data
-            let ptr = self.get_ptr(offset);
-            unsafe { core::ptr::copy_nonoverlapping(ptr, buf.as_mut_ptr().add(bytes0), bytes1) };
+            let ptr = self.get_ptr(self.head_index);
+            unsafe { core::ptr::copy_nonoverlapping(ptr, buf.as_mut_ptr(), bytes1) };
 
             // update state
             self.length1 -= bytes1;
@@ -616,18 +609,18 @@ impl<const N: usize, T> Consumer<N, T> {
             let bytes0 = self.read_first_buffer(buf, buf_len);
 
             // if there are still bytes left in length0 - we are done
-            if buf_len <= self.length0 {
+            if bytes0 > 0 {
                 self.update_buffer(bytes0);
-                return Ok(bytes0);
+                Ok(bytes0)
+            } else {
+                //  -> check second slice
+                let bytes1 = self.read_second_buffer(buf, buf_len);
+
+                // update state
+                self.update_buffer(bytes1);
+
+                Ok(bytes1)
             }
-
-            //  -> check second slice
-            let bytes1 = self.read_second_buffer(buf, buf_len, bytes0);
-
-            // update state
-            self.update_buffer(bytes0 + bytes1);
-
-            Ok(bytes0 + bytes1)
         }
     }
 }

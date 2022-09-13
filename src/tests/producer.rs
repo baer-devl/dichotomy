@@ -46,7 +46,10 @@ fn len_partial_full_wrapping_buffer() {
     consumer.read(&mut buf_read).unwrap();
 
     super::get_random_values(&mut buf);
-    producer.write(&buf).unwrap();
+    let mut written = 0;
+    while written < DATA {
+        written += producer.write(&buf[written..]).unwrap();
+    }
 
     assert_eq!(SIZE - DATA, producer.len());
 }
@@ -64,7 +67,10 @@ fn len_full_wrapping_buffer() {
     consumer.read(&mut buf_read).unwrap();
 
     super::get_random_values(&mut buf);
-    producer.write(&buf).unwrap();
+    let mut written = 0;
+    while written < DATA {
+        written += producer.write(&buf[written..]).unwrap();
+    }
     super::get_random_values(&mut buf[..SIZE - DATA]);
     producer.write(&buf[..SIZE - DATA]).unwrap();
 
@@ -135,9 +141,7 @@ fn is_full_full_wrapping_buffer() {
     consumer.read(&mut buf_read).unwrap();
 
     super::get_random_values(&mut buf);
-    producer.write(&buf).unwrap();
-    super::get_random_values(&mut buf[..SIZE - DATA]);
-    producer.write(&buf[..SIZE - DATA]).unwrap();
+    while producer.write(&buf).is_ok() {}
 
     assert!(producer.is_full());
 }
