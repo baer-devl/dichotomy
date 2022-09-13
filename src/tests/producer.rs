@@ -141,7 +141,9 @@ fn is_full_full_wrapping_buffer() {
     consumer.read(&mut buf_read).unwrap();
 
     super::get_random_values(&mut buf);
-    while producer.write(&buf).is_ok() {}
+    while producer.is_writeable() {
+        producer.write(&buf).unwrap();
+    }
 
     assert!(producer.is_full());
 }

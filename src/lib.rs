@@ -38,7 +38,7 @@
 //!
 //! 'X' representing both indicies of the tags which pointing to the same position. In this special
 //! case, the state of both tags have to be the same. Thus makes it easy to check, if both tags are
-//! the same the buffer is empty.
+//! the same which means that the buffer is empty.
 //!
 //! ## Filled buffer
 //! `
@@ -69,10 +69,10 @@
 //! processor can read/write an `usize` in a single instruction.
 //!
 //! # Limits
-//! As we are using holding an index and a state in a single `usize`, the maximum amount of
-//! elements in this buffer is limited by the architecture it runs on. For a 64 bit architecture it
-//! will be 32 bits, on a 32 bit architecture this will be 16 bits and on a 16bit architecture this
-//! will only be 8 bits. We handle those variants in our implementation.
+//! As we are store an index and a state in a single `usize`, the maximum amount of elements in
+//! this buffer is limited by the architecture it runs on. For a 64 bit architecture it will be
+//! 32 bits, on a 32 bit architecture this will be 16 bits and on a 16bit architecture this will
+//! only be 8 bits. We handle those variants in our implementation.
 use arc::Arc;
 use core::{cell::UnsafeCell, fmt::Debug, mem::ManuallyDrop, ptr::NonNull};
 
@@ -109,26 +109,30 @@ impl Debug for Error {
 }
 
 /// Split tag into its two parts: index and state
-///
-/// Handling 64 bit pointer width.
 #[inline]
 fn split(tag: usize) -> (usize, usize) {
     (index(tag), state(tag))
 }
 
 /// Get the index part of the tag
+///
+/// Handling 64 bit pointer width.
 #[cfg(target_pointer_width = "64")]
 #[inline]
 fn index(tag: usize) -> usize {
     tag >> 32
 }
 /// Get the index part of the tag
+///
+/// Handling 32 bit pointer width.
 #[cfg(target_pointer_width = "32")]
 #[inline]
 fn index(tag: usize) -> usize {
     tag >> 16
 }
 /// Get the index part of the tag
+///
+/// Handling 16 bit pointer width.
 #[cfg(target_pointer_width = "16")]
 #[inline]
 fn index(tag: usize) -> usize {
@@ -136,18 +140,24 @@ fn index(tag: usize) -> usize {
 }
 
 /// Get the state part of the tag
+///
+/// Handling 64 bit pointer width.
 #[cfg(target_pointer_width = "64")]
 #[inline]
 fn state(tag: usize) -> usize {
     tag & 0xffff_ffff
 }
 /// Get the state part of the tag
+///
+/// Handling 32 bit pointer width.
 #[cfg(target_pointer_width = "32")]
 #[inline]
 fn state(tag: usize) -> usize {
     tag & 0xffff
 }
 /// Get the state part of the tag
+///
+/// Handling 16 bit pointer width.
 #[cfg(target_pointer_width = "16")]
 #[inline]
 fn state(tag: usize) -> usize {
@@ -233,6 +243,14 @@ impl<const N: usize, T> Producer<N, T> {
         N - self.buffer.len()
     }
 
+    /// Return if the buffer is ready to write data
+    ///
+    /// This uses the cached values and might not represent the current state if cache is not
+    /// updated.
+    pub fn is_writeable(&self) -> bool {
+        self.length > 0
+    }
+
     /// Return if the buffer is full
     ///
     /// Keep in mind that this is an expensive operation as it will not use the cached values.
@@ -279,6 +297,9 @@ impl<const N: usize, T> Producer<N, T> {
         // update cached values
         self.tail_state += 1;
 
+        // check if we are wrapping around the buffer
+        // because we are assuming multiple writes, it is possible to remove the modulo operation
+        // as we can only write until the very end of the buffer which is `N`
         let new_index = self.tail_index + bytes;
         if new_index == N {
             self.tail_index = 0;
@@ -378,6 +399,11 @@ impl<const N: usize, T> Producer<N, T> {
     /// # Returns
     /// On success, the amount of written data is returned. If the buffer is full, an error will be
     /// returned.
+    ///
+    /// # Attention
+    /// It might be possible that the write will return earlier and wrote not all data to the
+    /// buffer. This is intentional and can be checked by the function [Self::is_writeable]. Caches
+    /// are checked if there is not enough space to write to.
     #[inline]
     pub fn write(&mut self, buf: &[T]) -> Result<usize> {
         let buf_len = buf.len();
@@ -392,6 +418,7 @@ impl<const N: usize, T> Producer<N, T> {
             // if there are still bytes left in length0 - we are done
             if bytes0 > 0 {
                 self.update_buffer(bytes0);
+
                 Ok(bytes0)
             } else {
                 //  -> check second slice
@@ -448,6 +475,14 @@ impl<const N: usize, T> Consumer<N, T> {
         self.buffer.len()
     }
 
+    /// Return if the buffer is ready to read data
+    ///
+    /// This uses the cached values and might not represent the current state if cache is not
+    /// updated.
+    pub fn is_readable(&self) -> bool {
+        self.length > 0
+    }
+
     /// Return if the buffer is empty
     ///
     /// Keep in mind that this is an expensive operation as it will not use the cached values.
@@ -493,6 +528,9 @@ impl<const N: usize, T> Consumer<N, T> {
     fn update_buffer(&mut self, bytes: usize) {
         self.head_state = state(self.last_tail_tag);
 
+        // check if we are wrapping around the buffer
+        // because we are assuming multiple reads, it is possible to remove the modulo operation
+        // as we can only read until the very end of the buffer which is `N`
         let new_index = self.head_index + bytes;
         if new_index == N {
             self.head_index = 0;
@@ -597,6 +635,11 @@ impl<const N: usize, T> Consumer<N, T> {
     /// # Returns
     /// On success, the amount of written data is returned. If the buffer is empty, an error will
     /// be returned.
+    ///
+    /// # Attention
+    /// It might be possible that the read will return earlier and wrote not all data to the
+    /// buffer. This is intentional and can be checked by the function [Self::is_readable]. Caches
+    /// are checked if there is not enough data to read from.
     #[inline]
     pub fn read(&mut self, buf: &mut [T]) -> Result<usize> {
         let buf_len = buf.len();
