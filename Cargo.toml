@@ -1,7 +1,13 @@
 [package]
 name = "dichotomy"
-authors = ["baer <gerald.schoiber@ins.jku.at"]
 version = "0.1.0"
+authors = ["Gerald Schoiber <baer.devl@gmail.com>"]
+description = "Generic non-locking SPSC ring-buffer with no atomic synchronization primitives"
+repository = "https://github.com/baer-devl/dichotomy"
+categories = ["asynchronous", "concurrency", "data-structures", "memory-management"]
+keywords = ["lock-free", "spsc", "buffer"]
+license = "Apache-2.0"
+readme = "README.md"
 edition = "2021"
 
 
